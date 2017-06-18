@@ -1,0 +1,28 @@
+include __init__.py
+include _support.py
+include _vixmodule.c
+include _vixmodule.h
+include callback_accumulator.c
+include constants.c
+include error_handling.c
+include host.c
+include lifo_linked_list.h
+include lock_manip.h
+include memory_systems.h
+include setup.py
+include snapshot.c
+include stateful_handle_wrapper.c
+include util.c
+include version.txt
+include vix.py
+include vm.c
+
+include docs/license.txt
+
+include tests/_support.py
+include tests/test_host.py
+include tests/test_vm.py
+
+include tests/data/pyvix_test_program__hello.bat
+
+global-exclude CVS

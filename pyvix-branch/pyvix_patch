@@ -1,0 +1,3897 @@
+diff -Naur ../pyvix/callback_accumulator.c ./callback_accumulator.c
+--- ../pyvix/callback_accumulator.c	2006-06-27 22:24:21.000000000 -0500
++++ ./callback_accumulator.c	2008-04-22 18:36:15.000000000 -0500
+@@ -2,9 +2,25 @@
+  * pyvix - Implementation of VixCallbackAccumulator Type
+  * Copyright 2006 David S. Rushby
+  * Available under the MIT license (see docs/license.txt for details).
+- *****************************************************************************/
++ ****************************************************************************
++ * 
++ * 
++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
++ * 
++ * Added Support for VixCallBack to use tuple.
++ * Added accumulators to get Directory, Process, and Shared Folder Information
++ * 
++ * APIs added:
++ * 
++ * VixCallbackAccumulator_ListInit - renameed from VixCallbackAccumulator_init
++ * VixCallbackAccumulator_TupleInit - add Accumulator Support for tuples
++ * VixCallbackAccumulator_accumulateProcessList - info from Listing Processes
++ * VixCallbackAccumulator_accumulateDirectoryList - info from Listing Directories
++ * VixCallbackAccumulator_accumulateProcessStats - Statistics from running programs/scripts 
++ * 
++ */
+ 
+-static status VixCallbackAccumulator_init(VixCallbackAccumulator *acc) {
++static status VixCallbackAccumulator_ListInit(VixCallbackAccumulator *acc) {
+   assert (acc != NULL);
+ 
+   acc->target = PyList_New(0);
+@@ -14,7 +30,20 @@
+   fail:
+     assert (PyErr_Occurred());
+     return FAILED;
+-} /* VixCallbackAccumulator_init */
++} /* VixCallbackAccumulator_ListInit */
++
++static status VixCallbackAccumulator_TupleInit(VixCallbackAccumulator *acc, unsigned int items) {
++  assert (acc != NULL);
++
++  acc->target = PyTuple_New(items);
++  if (acc->target == NULL) { goto fail; }
++
++  return SUCCEEDED;
++  fail:
++    assert (PyErr_Occurred());
++    return FAILED;
++} /* VixCallbackAccumulator_Tuplenit */
++
+ 
+ static status VixCallbackAccumulator_clear(VixCallbackAccumulator *acc) {
+   assert (acc != NULL);
+@@ -45,7 +74,7 @@
+   assert (acc != NULL);
+   assert (acc->target != NULL);
+   assert (PyList_CheckExact(acc->target));
+-
++  
+   assert (eventInfo != VIX_INVALID_HANDLE);
+   pyStr = pyf_extractProperty(eventInfo, VIX_PROPERTY_FOUND_ITEM_LOCATION);
+   if (pyStr == NULL) { goto fail; }
+@@ -60,3 +89,281 @@
+     Py_XDECREF(pyStr);
+     LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+ } /* VixCallback_accumulateStringList */
++
++static void VixCallback_accumulateProcessList(VixHandle jobH,
++    VixEventType eventType, VixHandle eventInfo, void *clientData
++  )
++{
++  PyGILState_STATE gstate;
++  PyObject *pyPName = NULL,
++  		   *pyPID = NULL,
++  		   *pyOwner = NULL,
++  		   *pyCmdLine = NULL,
++  		   *pyProcTuple = NULL;
++
++  unsigned int numProcs = 0, index = 0;
++  /* Note:  clientData is typically a pointer to memory on another thread's
++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
++   * that the other thread is still waiting for this thread to finish. */
++  VixCallbackAccumulator *acc = NULL;
++
++  
++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++  
++  acc = (VixCallbackAccumulator *) clientData;
++  assert (acc != NULL);
++  assert (acc->target != NULL);
++  assert (PyList_CheckExact(acc->target));
++  
++  
++  numProcs = VixJob_GetNumProperties(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
++  
++  for (index = 0; index < numProcs; index++){
++	  /* Set these to Null for fail check if necessary */
++	  pyProcTuple = NULL;
++	  pyPName = NULL;
++	  pyPID = NULL;
++	  pyCmdLine = NULL;
++	  pyOwner = NULL;
++
++	  
++	  /* Proc Name */
++	  pyPName = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME, index);
++	  if (pyPName == NULL && 
++			  (pyPName = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
++	  
++	  /* Pid */
++	  pyPID = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_ID, index);
++	  
++	  /* Owner */	  
++	  pyOwner = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_OWNER, index);
++	  if (pyOwner == NULL && 
++			  (pyOwner = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
++	  
++	  /* Cmd Line */
++	  pyCmdLine = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_COMMAND, index);
++	  if (pyCmdLine == NULL && 
++			  (pyCmdLine = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
++	  
++
++	  /* Add Process Items to the Tuple */
++	  pyProcTuple = PyTuple_New(4);
++	  if (pyProcTuple == NULL) { goto fail; }
++	  if (PyTuple_SetItem(pyProcTuple, 0, pyPID) == -1){goto fail;}
++	  if (PyTuple_SetItem(pyProcTuple, 1, pyPName) == -1){goto fail;}
++	  if (PyTuple_SetItem(pyProcTuple, 2, pyOwner) == -1){goto fail;}
++	  if (PyTuple_SetItem(pyProcTuple, 3, pyCmdLine) == -1){goto fail;}
++	  
++	  /* Add the Tuple to the List */
++	  if (PyList_Append(acc->target, pyProcTuple) != 0) { goto fail; }
++	  Py_XDECREF(pyProcTuple);
++	  
++  }
++  goto cleanup;
++  fail:
++    assert (PyErr_Occurred());
++    if(pyProcTuple != NULL) {
++    	/* pyProcTuple was created successfully, but 
++    	 * the failure occurred during list append or
++    	 * adding an item.  Since PyTuple_SetItem 'steals'
++    	 * references, we only need to XDECREF that object
++    	 */
++    	Py_XDECREF(pyProcTuple);
++    }else{
++    	if(pyPID != NULL) { Py_XDECREF(pyPID); }
++    	if(pyPName != NULL) { Py_XDECREF(pyPName); }
++    	if(pyOwner != NULL) { Py_XDECREF(pyOwner); }
++    	if(pyCmdLine != NULL) { Py_XDECREF(pyCmdLine); }
++    }
++    /* Fall through to cleanup: */
++  cleanup:
++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++} /* VixCallback_accumulateProcessList */
++
++
++
++static void VixCallback_accumulateDirectoryList(VixHandle jobH,
++    VixEventType eventType, VixHandle eventInfo, void *clientData
++  )
++{
++  PyGILState_STATE gstate;
++  PyObject *pyFName = NULL,
++  		   *pyFFlags = NULL,
++  		   *pyFileProps = NULL;
++
++  unsigned int numDirs = 0, index = 0;
++  /* Note:  clientData is typically a pointer to memory on another thread's
++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
++   * that the other thread is still waiting for this thread to finish. */
++  VixCallbackAccumulator *acc = NULL;
++
++  
++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++  
++  acc = (VixCallbackAccumulator *) clientData;
++  assert (acc != NULL);
++  assert (acc->target != NULL);
++  assert (PyList_CheckExact(acc->target));
++  //assert (eventInfo != VIX_INVALID_HANDLE);
++  
++  numDirs = VixJob_GetNumProperties(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
++  for (index = 0; index < numDirs; index++){
++	  /* Set these to Null for fail check if necessary */
++	  pyFName = NULL;
++	  pyFFlags = NULL;
++	  pyFileProps = NULL;
++	  
++	  /* File Name */
++	  pyFName = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME, index);
++	  if (pyFName == NULL && 
++			  (pyFName = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
++	  /* File Name */
++	  pyFFlags = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_FILE_FLAGS, index);
++	  if (pyFFlags == NULL && 
++			  (pyFFlags = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
++	  
++	  /* Add Process Items to the Tuple */
++	  pyFileProps= PyTuple_New(2);
++	  if (pyFileProps == NULL) { goto fail; }
++	  if (PyTuple_SetItem(pyFileProps, 0, pyFName) == -1){goto fail;}
++	  if (PyTuple_SetItem(pyFileProps, 1, pyFFlags) == -1){goto fail;}
++	  	  
++	  /* Add the File Name to the List */
++	  if (PyList_Append(acc->target, pyFileProps) != 0) { goto fail; }
++	  Py_XDECREF(pyFileProps);	  
++  }
++  
++  goto cleanup;
++  fail:
++    assert (PyErr_Occurred());
++    if(pyFileProps != NULL) { Py_XDECREF(pyFileProps); }
++    else{
++	    if(pyFName != NULL) { Py_XDECREF(pyFName); }
++	    if(pyFFlags != NULL) { Py_XDECREF(pyFFlags); }
++    }
++    /* Fall through to cleanup: */
++  cleanup:
++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++} /* VixCallback_accumulateDirectoryList */
++
++static void VixCallback_accumulateSharedStateList(VixHandle jobH,
++    VixEventType eventType, VixHandle eventInfo, void *clientData
++  )
++{
++  PyGILState_STATE gstate;
++  PyObject *pyFName = NULL,
++  		   *pyHostPath = NULL,
++  		   *pyFolderFlags = NULL;
++
++  
++  /* Note:  clientData is typically a pointer to memory on another thread's
++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
++   * that the other thread is still waiting for this thread to finish. */
++  VixCallbackAccumulator *acc = NULL;
++
++  
++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++  
++  acc = (VixCallbackAccumulator *) clientData;
++  assert (acc != NULL);
++  assert (acc->target != NULL);
++  assert (PyTuple_CheckExact(acc->target));
++  assert (PyTuple_Size(	acc->target) == 3);
++  
++  pyFName = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
++  if (pyFName == NULL) { goto fail; }
++  			
++  pyHostPath = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_SHARED_FOLDER_HOST);
++  if (pyHostPath == NULL) { goto fail; }
++  
++  pyFolderFlags = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_SHARED_FOLDER_FLAGS);
++  if (pyFolderFlags == NULL) { goto fail; }
++  
++  /* Add the item, then set the object to NULL
++   * since PyTuple steals the reference.  In case
++   * of a failure this keeps XDECREF from over 
++   * decrementing references once they are in the 
++   * tuple object
++   */
++  if (PyTuple_SetItem(acc->target, 0, pyFName) == -1){goto fail;}
++  pyFName = NULL;
++  if (PyTuple_SetItem(acc->target, 1, pyHostPath) == -1){goto fail;}
++  pyHostPath = NULL;
++  if (PyTuple_SetItem(acc->target, 2, pyFolderFlags) == -1){goto fail;}
++  pyFolderFlags = NULL;
++  
++  
++  
++  
++  goto cleanup;
++  fail:
++    assert (PyErr_Occurred());
++    if (pyFName != NULL) { Py_XDECREF(pyFName); }
++    if (pyHostPath != NULL) { Py_XDECREF(pyHostPath); }
++    if (pyFolderFlags != NULL) { Py_XDECREF(pyFolderFlags); }
++      
++    /* Fall through to cleanup: */
++  cleanup:
++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++} /* VixCallback_accumulateSharedFolderState */
++static void VixCallback_accumulateProcessStats(VixHandle jobH,
++    VixEventType eventType, VixHandle eventInfo, void *clientData
++  )
++{
++  PyGILState_STATE gstate;
++  PyObject *pyPID = NULL,
++  		   *pyElapsedTime = NULL,
++  		   *pyExitCode = NULL;
++
++  
++  /* Note:  clientData is typically a pointer to memory on another thread's
++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
++   * that the other thread is still waiting for this thread to finish. */
++  VixCallbackAccumulator *acc = NULL;
++
++  
++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++  
++  acc = (VixCallbackAccumulator *) clientData;
++  assert (acc != NULL);
++  assert (acc->target != NULL);
++  assert (PyTuple_CheckExact(acc->target));
++  assert (PyTuple_Size(	acc->target) == 3);
++  
++  pyPID = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_ID);
++  if (pyPID == NULL) { goto fail; }
++  			
++  pyElapsedTime = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_PROGRAM_ELAPSED_TIME);
++  if (pyElapsedTime == NULL) { goto fail; }
++  
++  pyExitCode = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_PROGRAM_EXIT_CODE);
++  if (pyExitCode == NULL) { goto fail; }
++  
++  /* Add the item, then set the object to NULL
++   * since PyTuple steals the reference.  In case
++   * of a failure this keeps XDECREF from over 
++   * decrementing references once they are in the 
++   * tuple object
++   */
++  if (PyTuple_SetItem(acc->target, 0, pyPID) == -1){goto fail;}
++  pyPID = NULL;
++  if (PyTuple_SetItem(acc->target, 1, pyElapsedTime) == -1){goto fail;}
++  pyElapsedTime = NULL;
++  if (PyTuple_SetItem(acc->target, 2, pyExitCode) == -1){goto fail;}
++  pyExitCode = NULL;
++  
++  goto cleanup;
++  fail:
++    assert (PyErr_Occurred());
++    if (pyPID != NULL) { Py_XDECREF(pyPID); }
++    if (pyElapsedTime != NULL) { Py_XDECREF(pyElapsedTime); }
++    if (pyExitCode != NULL) { Py_XDECREF(pyExitCode); }
++      
++    /* Fall through to cleanup: */
++  cleanup:
++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++} /* VixCallback_accumulateSharedFolderState */
+diff -Naur ../pyvix/constants.c ./constants.c
+--- ../pyvix/constants.c	2006-06-27 22:24:22.000000000 -0500
++++ ./constants.c	2008-04-22 18:36:15.000000000 -0500
+@@ -2,7 +2,13 @@
+  * pyvix - Make the Essential VIX Constants Available to Python
+  * Copyright 2006 David S. Rushby
+  * Available under the MIT license (see docs/license.txt for details).
+- *****************************************************************************/
++ ****************************************************************************
++ * 
++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
++ * 
++ * Updated constants that changed from the previous VMWare VIX SDK
++ * 
++ * */
+ 
+ /* SIC is just a shortcut for entering integer constants into dict d: */
+ #define SIC(name) \
+@@ -71,12 +77,9 @@
+   SIC(VIX_E_HOST_USER_PERMISSIONS);
+   SIC(VIX_E_GUEST_USER_PERMISSIONS);
+   SIC(VIX_E_TOOLS_NOT_RUNNING);
+-  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
+-  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_VM);
+-  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
+-  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_VM);
+-  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
+-  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_VM);
++  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED);
++  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED);
++  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED);
+   SIC(VIX_E_MISSING_ANON_GUEST_ACCOUNT);
+   SIC(VIX_E_CANNOT_AUTHENTICATE_WITH_GUEST);
+   SIC(VIX_E_UNRECOGNIZED_COMMAND_IN_GUEST);
+diff -Naur ../pyvix/CVS/Entries ./CVS/Entries
+--- ../pyvix/CVS/Entries	2008-04-22 18:33:56.000000000 -0500
++++ ./CVS/Entries	2008-04-22 18:36:15.000000000 -0500
+@@ -1,22 +1,23 @@
+-/MANIFEST/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/MANIFEST.in/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/__init__.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-/_support.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-/_vixmodule.c/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-/_vixmodule.h/1.1.1.1/Wed Jun 28 03:24:28 2006//
++/MANIFEST/1.1.1.1/Sat Apr 19 18:05:15 2008//
++/MANIFEST.in/1.1.1.1/Sat Apr 19 18:05:14 2008//
++/__init__.py/1.1.1.1/Sat Apr 19 18:05:15 2008//
++/_support.py/1.1.1.1/Sat Apr 19 18:05:14 2008//
++/_vixmodule.c/1.1.1.1/Sat Apr 19 18:05:15 2008//
++/_vixmodule.h/1.1.1.1/Sat Apr 19 18:05:14 2008//
+ /callback_accumulator.c/1.1.1.1/Wed Jun 28 03:24:21 2006//
+ /constants.c/1.1.1.1/Wed Jun 28 03:24:22 2006//
++D/docs////
+ /error_handling.c/1.1.1.1/Wed Jun 28 03:24:22 2006//
+ /host.c/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/lifo_linked_list.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/lock_manip.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/memory_systems.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
+-/setup.cfg/1.1.1.1/Wed Jun 28 03:24:23 2006//
++/lifo_linked_list.h/1.1.1.1/Sat Apr 19 18:05:14 2008//
++/lock_manip.h/1.1.1.1/Sat Apr 19 18:05:15 2008//
++/memory_systems.h/1.1.1.1/Sat Apr 19 18:05:15 2008//
++/setup.cfg/1.1.1.1/Sat Apr 19 18:05:14 2008//
+ /setup.py/1.2/Wed Jul 12 14:42:06 2006//
+-/snapshot.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
+-/stateful_handle_wrapper.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
++/snapshot.c/1.1.1.1/Sat Apr 19 18:05:14 2008//
++/stateful_handle_wrapper.c/1.1.1.1/Sat Apr 19 18:05:14 2008//
++D/tests////
+ /util.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
+ /version.txt/1.2/Tue Jul 18 14:37:53 2006//
+ /vix.py/1.3/Tue Jul 18 14:37:53 2006//
+-/vm.c/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-D
++/vm.c/1.1.1.1/Sat Apr 19 21:57:58 2008//
+diff -Naur ../pyvix/CVS/Entries.Log ./CVS/Entries.Log
+--- ../pyvix/CVS/Entries.Log	2008-04-22 18:34:18.000000000 -0500
++++ ./CVS/Entries.Log	1969-12-31 17:00:00.000000000 -0700
+@@ -1,2 +0,0 @@
+-A D/docs////
+-A D/tests////
+diff -Naur ../pyvix/docs/CVS/Entries ./docs/CVS/Entries
+--- ../pyvix/docs/CVS/Entries	2008-04-22 18:33:56.000000000 -0500
++++ ./docs/CVS/Entries	2008-04-22 18:36:15.000000000 -0500
+@@ -1,3 +1,2 @@
+-/changelog.txt/1.1/Tue Jul 18 14:37:53 2006//
+-/license.txt/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-D
++/changelog.txt/1.1/Sat Apr 19 18:05:15 2008//
++/license.txt/1.1.1.1/Sat Apr 19 18:05:15 2008//
+diff -Naur ../pyvix/error_handling.c ./error_handling.c
+--- ../pyvix/error_handling.c	2006-06-27 22:24:22.000000000 -0500
++++ ./error_handling.c	2008-04-22 18:36:15.000000000 -0500
+@@ -69,12 +69,9 @@
+   switch (err) {
+     case VIX_E_HOST_USER_PERMISSIONS:
+     case VIX_E_GUEST_USER_PERMISSIONS:
+-    case VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
+-    case VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_VM:
+-    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
+-    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_VM:
+-    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
+-    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_VM:
++    case VIX_E_GUEST_OPERATIONS_PROHIBITED:
++    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED:
++    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED:
+     case VIX_E_MISSING_ANON_GUEST_ACCOUNT:
+     case VIX_E_CANNOT_AUTHENTICATE_WITH_GUEST:
+       excType = VIXSecurityException;
+diff -Naur ../pyvix/host.c ./host.c
+--- ../pyvix/host.c	2006-06-27 22:24:23.000000000 -0500
++++ ./host.c	2008-04-22 18:36:15.000000000 -0500
+@@ -161,7 +161,7 @@
+ 
+   HOST_REQUIRE_OPEN(self);
+ 
+-  if (VixCallbackAccumulator_init(&acc) != SUCCEEDED) { goto fail; }
++  if (VixCallbackAccumulator_ListInit(&acc) != SUCCEEDED) { goto fail; }
+ 
+   LEAVE_PYTHON
+   jobH = VixHost_FindItems(self->handle, VIX_FIND_RUNNING_VMS,
+diff -Naur ../pyvix/__init__.pyc ./__init__.pyc
+--- ../pyvix/__init__.pyc	2008-04-22 19:05:53.000000000 -0500
++++ ./__init__.pyc	1969-12-31 17:00:00.000000000 -0700
+@@ -1,2 +0,0 @@
+-³ò
+-lö¡Dc           @   s   d  S(   N(    (    (    (    s   pyvix/__init__.pys   <module>   s    
+\ No newline at end of file
+diff -Naur ../pyvix/.project ./.project
+--- ../pyvix/.project	1969-12-31 17:00:00.000000000 -0700
++++ ./.project	2008-04-22 18:36:15.000000000 -0500
+@@ -0,0 +1,81 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<projectDescription>
++	<name>pyvix</name>
++	<comment></comment>
++	<projects>
++	</projects>
++	<buildSpec>
++		<buildCommand>
++			<name>org.eclipse.cdt.managedbuilder.core.genmakebuilder</name>
++			<triggers>clean,full,incremental,</triggers>
++			<arguments>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.cleanBuildTarget</key>
++					<value>clean</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.enableCleanBuild</key>
++					<value>true</value>
++				</dictionary>
++				<dictionary>
++					<key>?name?</key>
++					<value></value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.append_environment</key>
++					<value>true</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.stopOnError</key>
++					<value>true</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.buildCommand</key>
++					<value>make</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.contents</key>
++					<value>org.eclipse.cdt.make.core.activeConfigSettings</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.buildLocation</key>
++					<value>${workspace_loc:/pyvix/Debug}</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.useDefaultBuildCmd</key>
++					<value>true</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.enableAutoBuild</key>
++					<value>false</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.enableFullBuild</key>
++					<value>true</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.buildArguments</key>
++					<value></value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.fullBuildTarget</key>
++					<value>all</value>
++				</dictionary>
++				<dictionary>
++					<key>org.eclipse.cdt.make.core.autoBuildTarget</key>
++					<value>all</value>
++				</dictionary>
++			</arguments>
++		</buildCommand>
++		<buildCommand>
++			<name>org.eclipse.cdt.managedbuilder.core.ScannerConfigBuilder</name>
++			<arguments>
++			</arguments>
++		</buildCommand>
++	</buildSpec>
++	<natures>
++		<nature>org.eclipse.cdt.managedbuilder.core.ScannerConfigNature</nature>
++		<nature>org.eclipse.cdt.managedbuilder.core.managedBuildNature</nature>
++		<nature>org.eclipse.cdt.core.cnature</nature>
++	</natures>
++</projectDescription>
+diff -Naur ../pyvix/pyvix_patch ./pyvix_patch
+--- ../pyvix/pyvix_patch	1969-12-31 17:00:00.000000000 -0700
++++ ./pyvix_patch	2008-04-22 19:24:26.000000000 -0500
+@@ -0,0 +1,557 @@
++diff -Naur ../pyvix/callback_accumulator.c ./callback_accumulator.c
++--- ../pyvix/callback_accumulator.c	2006-06-27 22:24:21.000000000 -0500
+++++ ./callback_accumulator.c	2008-04-22 18:36:15.000000000 -0500
++@@ -2,9 +2,25 @@
++  * pyvix - Implementation of VixCallbackAccumulator Type
++  * Copyright 2006 David S. Rushby
++  * Available under the MIT license (see docs/license.txt for details).
++- *****************************************************************************/
+++ ****************************************************************************
+++ * 
+++ * 
+++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
+++ * 
+++ * Added Support for VixCallBack to use tuple.
+++ * Added accumulators to get Directory, Process, and Shared Folder Information
+++ * 
+++ * APIs added:
+++ * 
+++ * VixCallbackAccumulator_ListInit - renameed from VixCallbackAccumulator_init
+++ * VixCallbackAccumulator_TupleInit - add Accumulator Support for tuples
+++ * VixCallbackAccumulator_accumulateProcessList - info from Listing Processes
+++ * VixCallbackAccumulator_accumulateDirectoryList - info from Listing Directories
+++ * VixCallbackAccumulator_accumulateProcessStats - Statistics from running programs/scripts 
+++ * 
+++ */
++ 
++-static status VixCallbackAccumulator_init(VixCallbackAccumulator *acc) {
+++static status VixCallbackAccumulator_ListInit(VixCallbackAccumulator *acc) {
++   assert (acc != NULL);
++ 
++   acc->target = PyList_New(0);
++@@ -14,7 +30,20 @@
++   fail:
++     assert (PyErr_Occurred());
++     return FAILED;
++-} /* VixCallbackAccumulator_init */
+++} /* VixCallbackAccumulator_ListInit */
+++
+++static status VixCallbackAccumulator_TupleInit(VixCallbackAccumulator *acc, unsigned int items) {
+++  assert (acc != NULL);
+++
+++  acc->target = PyTuple_New(items);
+++  if (acc->target == NULL) { goto fail; }
+++
+++  return SUCCEEDED;
+++  fail:
+++    assert (PyErr_Occurred());
+++    return FAILED;
+++} /* VixCallbackAccumulator_Tuplenit */
+++
++ 
++ static status VixCallbackAccumulator_clear(VixCallbackAccumulator *acc) {
++   assert (acc != NULL);
++@@ -45,7 +74,7 @@
++   assert (acc != NULL);
++   assert (acc->target != NULL);
++   assert (PyList_CheckExact(acc->target));
++-
+++  
++   assert (eventInfo != VIX_INVALID_HANDLE);
++   pyStr = pyf_extractProperty(eventInfo, VIX_PROPERTY_FOUND_ITEM_LOCATION);
++   if (pyStr == NULL) { goto fail; }
++@@ -60,3 +89,281 @@
++     Py_XDECREF(pyStr);
++     LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
++ } /* VixCallback_accumulateStringList */
+++
+++static void VixCallback_accumulateProcessList(VixHandle jobH,
+++    VixEventType eventType, VixHandle eventInfo, void *clientData
+++  )
+++{
+++  PyGILState_STATE gstate;
+++  PyObject *pyPName = NULL,
+++  		   *pyPID = NULL,
+++  		   *pyOwner = NULL,
+++  		   *pyCmdLine = NULL,
+++  		   *pyProcTuple = NULL;
+++
+++  unsigned int numProcs = 0, index = 0;
+++  /* Note:  clientData is typically a pointer to memory on another thread's
+++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
+++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
+++   * that the other thread is still waiting for this thread to finish. */
+++  VixCallbackAccumulator *acc = NULL;
+++
+++  
+++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++  
+++  acc = (VixCallbackAccumulator *) clientData;
+++  assert (acc != NULL);
+++  assert (acc->target != NULL);
+++  assert (PyList_CheckExact(acc->target));
+++  
+++  
+++  numProcs = VixJob_GetNumProperties(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
+++  
+++  for (index = 0; index < numProcs; index++){
+++	  /* Set these to Null for fail check if necessary */
+++	  pyProcTuple = NULL;
+++	  pyPName = NULL;
+++	  pyPID = NULL;
+++	  pyCmdLine = NULL;
+++	  pyOwner = NULL;
+++
+++	  
+++	  /* Proc Name */
+++	  pyPName = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME, index);
+++	  if (pyPName == NULL && 
+++			  (pyPName = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
+++	  
+++	  /* Pid */
+++	  pyPID = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_ID, index);
+++	  
+++	  /* Owner */	  
+++	  pyOwner = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_OWNER, index);
+++	  if (pyOwner == NULL && 
+++			  (pyOwner = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
+++	  
+++	  /* Cmd Line */
+++	  pyCmdLine = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_COMMAND, index);
+++	  if (pyCmdLine == NULL && 
+++			  (pyCmdLine = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
+++	  
+++
+++	  /* Add Process Items to the Tuple */
+++	  pyProcTuple = PyTuple_New(4);
+++	  if (pyProcTuple == NULL) { goto fail; }
+++	  if (PyTuple_SetItem(pyProcTuple, 0, pyPID) == -1){goto fail;}
+++	  if (PyTuple_SetItem(pyProcTuple, 1, pyPName) == -1){goto fail;}
+++	  if (PyTuple_SetItem(pyProcTuple, 2, pyOwner) == -1){goto fail;}
+++	  if (PyTuple_SetItem(pyProcTuple, 3, pyCmdLine) == -1){goto fail;}
+++	  
+++	  /* Add the Tuple to the List */
+++	  if (PyList_Append(acc->target, pyProcTuple) != 0) { goto fail; }
+++	  Py_XDECREF(pyProcTuple);
+++	  
+++  }
+++  goto cleanup;
+++  fail:
+++    assert (PyErr_Occurred());
+++    if(pyProcTuple != NULL) {
+++    	/* pyProcTuple was created successfully, but 
+++    	 * the failure occurred during list append or
+++    	 * adding an item.  Since PyTuple_SetItem 'steals'
+++    	 * references, we only need to XDECREF that object
+++    	 */
+++    	Py_XDECREF(pyProcTuple);
+++    }else{
+++    	if(pyPID != NULL) { Py_XDECREF(pyPID); }
+++    	if(pyPName != NULL) { Py_XDECREF(pyPName); }
+++    	if(pyOwner != NULL) { Py_XDECREF(pyOwner); }
+++    	if(pyCmdLine != NULL) { Py_XDECREF(pyCmdLine); }
+++    }
+++    /* Fall through to cleanup: */
+++  cleanup:
+++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++} /* VixCallback_accumulateProcessList */
+++
+++
+++
+++static void VixCallback_accumulateDirectoryList(VixHandle jobH,
+++    VixEventType eventType, VixHandle eventInfo, void *clientData
+++  )
+++{
+++  PyGILState_STATE gstate;
+++  PyObject *pyFName = NULL,
+++  		   *pyFFlags = NULL,
+++  		   *pyFileProps = NULL;
+++
+++  unsigned int numDirs = 0, index = 0;
+++  /* Note:  clientData is typically a pointer to memory on another thread's
+++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
+++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
+++   * that the other thread is still waiting for this thread to finish. */
+++  VixCallbackAccumulator *acc = NULL;
+++
+++  
+++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++  
+++  acc = (VixCallbackAccumulator *) clientData;
+++  assert (acc != NULL);
+++  assert (acc->target != NULL);
+++  assert (PyList_CheckExact(acc->target));
+++  //assert (eventInfo != VIX_INVALID_HANDLE);
+++  
+++  numDirs = VixJob_GetNumProperties(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
+++  for (index = 0; index < numDirs; index++){
+++	  /* Set these to Null for fail check if necessary */
+++	  pyFName = NULL;
+++	  pyFFlags = NULL;
+++	  pyFileProps = NULL;
+++	  
+++	  /* File Name */
+++	  pyFName = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME, index);
+++	  if (pyFName == NULL && 
+++			  (pyFName = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
+++	  /* File Name */
+++	  pyFFlags = pyf_extractNthProperty(jobH, VIX_PROPERTY_JOB_RESULT_FILE_FLAGS, index);
+++	  if (pyFFlags == NULL && 
+++			  (pyFFlags = PyString_FromString("Process Command Unknown")) == NULL ) { goto fail; }
+++	  
+++	  /* Add Process Items to the Tuple */
+++	  pyFileProps= PyTuple_New(2);
+++	  if (pyFileProps == NULL) { goto fail; }
+++	  if (PyTuple_SetItem(pyFileProps, 0, pyFName) == -1){goto fail;}
+++	  if (PyTuple_SetItem(pyFileProps, 1, pyFFlags) == -1){goto fail;}
+++	  	  
+++	  /* Add the File Name to the List */
+++	  if (PyList_Append(acc->target, pyFileProps) != 0) { goto fail; }
+++	  Py_XDECREF(pyFileProps);	  
+++  }
+++  
+++  goto cleanup;
+++  fail:
+++    assert (PyErr_Occurred());
+++    if(pyFileProps != NULL) { Py_XDECREF(pyFileProps); }
+++    else{
+++	    if(pyFName != NULL) { Py_XDECREF(pyFName); }
+++	    if(pyFFlags != NULL) { Py_XDECREF(pyFFlags); }
+++    }
+++    /* Fall through to cleanup: */
+++  cleanup:
+++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++} /* VixCallback_accumulateDirectoryList */
+++
+++static void VixCallback_accumulateSharedStateList(VixHandle jobH,
+++    VixEventType eventType, VixHandle eventInfo, void *clientData
+++  )
+++{
+++  PyGILState_STATE gstate;
+++  PyObject *pyFName = NULL,
+++  		   *pyHostPath = NULL,
+++  		   *pyFolderFlags = NULL;
+++
+++  
+++  /* Note:  clientData is typically a pointer to memory on another thread's
+++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
+++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
+++   * that the other thread is still waiting for this thread to finish. */
+++  VixCallbackAccumulator *acc = NULL;
+++
+++  
+++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++  
+++  acc = (VixCallbackAccumulator *) clientData;
+++  assert (acc != NULL);
+++  assert (acc->target != NULL);
+++  assert (PyTuple_CheckExact(acc->target));
+++  assert (PyTuple_Size(	acc->target) == 3);
+++  
+++  pyFName = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_ITEM_NAME);
+++  if (pyFName == NULL) { goto fail; }
+++  			
+++  pyHostPath = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_SHARED_FOLDER_HOST);
+++  if (pyHostPath == NULL) { goto fail; }
+++  
+++  pyFolderFlags = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_SHARED_FOLDER_FLAGS);
+++  if (pyFolderFlags == NULL) { goto fail; }
+++  
+++  /* Add the item, then set the object to NULL
+++   * since PyTuple steals the reference.  In case
+++   * of a failure this keeps XDECREF from over 
+++   * decrementing references once they are in the 
+++   * tuple object
+++   */
+++  if (PyTuple_SetItem(acc->target, 0, pyFName) == -1){goto fail;}
+++  pyFName = NULL;
+++  if (PyTuple_SetItem(acc->target, 1, pyHostPath) == -1){goto fail;}
+++  pyHostPath = NULL;
+++  if (PyTuple_SetItem(acc->target, 2, pyFolderFlags) == -1){goto fail;}
+++  pyFolderFlags = NULL;
+++  
+++  
+++  
+++  
+++  goto cleanup;
+++  fail:
+++    assert (PyErr_Occurred());
+++    if (pyFName != NULL) { Py_XDECREF(pyFName); }
+++    if (pyHostPath != NULL) { Py_XDECREF(pyHostPath); }
+++    if (pyFolderFlags != NULL) { Py_XDECREF(pyFolderFlags); }
+++      
+++    /* Fall through to cleanup: */
+++  cleanup:
+++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++} /* VixCallback_accumulateSharedFolderState */
+++static void VixCallback_accumulateProcessStats(VixHandle jobH,
+++    VixEventType eventType, VixHandle eventInfo, void *clientData
+++  )
+++{
+++  PyGILState_STATE gstate;
+++  PyObject *pyPID = NULL,
+++  		   *pyElapsedTime = NULL,
+++  		   *pyExitCode = NULL;
+++
+++  
+++  /* Note:  clientData is typically a pointer to memory on another thread's
+++   * stack, so it's imperative that we refrain from accessing it IN ANY WAY
+++   * (even just to cast it to VixCallbackAccumulator *acc) until we're sure
+++   * that the other thread is still waiting for this thread to finish. */
+++  VixCallbackAccumulator *acc = NULL;
+++
+++  
+++  ENTER_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++  
+++  acc = (VixCallbackAccumulator *) clientData;
+++  assert (acc != NULL);
+++  assert (acc->target != NULL);
+++  assert (PyTuple_CheckExact(acc->target));
+++  assert (PyTuple_Size(	acc->target) == 3);
+++  
+++  pyPID = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_PROCESS_ID);
+++  if (pyPID == NULL) { goto fail; }
+++  			
+++  pyElapsedTime = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_PROGRAM_ELAPSED_TIME);
+++  if (pyElapsedTime == NULL) { goto fail; }
+++  
+++  pyExitCode = pyf_extractProperty(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_PROGRAM_EXIT_CODE);
+++  if (pyExitCode == NULL) { goto fail; }
+++  
+++  /* Add the item, then set the object to NULL
+++   * since PyTuple steals the reference.  In case
+++   * of a failure this keeps XDECREF from over 
+++   * decrementing references once they are in the 
+++   * tuple object
+++   */
+++  if (PyTuple_SetItem(acc->target, 0, pyPID) == -1){goto fail;}
+++  pyPID = NULL;
+++  if (PyTuple_SetItem(acc->target, 1, pyElapsedTime) == -1){goto fail;}
+++  pyElapsedTime = NULL;
+++  if (PyTuple_SetItem(acc->target, 2, pyExitCode) == -1){goto fail;}
+++  pyExitCode = NULL;
+++  
+++  goto cleanup;
+++  fail:
+++    assert (PyErr_Occurred());
+++    if (pyPID != NULL) { Py_XDECREF(pyPID); }
+++    if (pyElapsedTime != NULL) { Py_XDECREF(pyElapsedTime); }
+++    if (pyExitCode != NULL) { Py_XDECREF(pyExitCode); }
+++      
+++    /* Fall through to cleanup: */
+++  cleanup:
+++    LEAVE_PYTHON_WITHOUT_CODE_BLOCK(gstate);
+++} /* VixCallback_accumulateSharedFolderState */
++diff -Naur ../pyvix/constants.c ./constants.c
++--- ../pyvix/constants.c	2006-06-27 22:24:22.000000000 -0500
+++++ ./constants.c	2008-04-22 18:36:15.000000000 -0500
++@@ -2,7 +2,13 @@
++  * pyvix - Make the Essential VIX Constants Available to Python
++  * Copyright 2006 David S. Rushby
++  * Available under the MIT license (see docs/license.txt for details).
++- *****************************************************************************/
+++ ****************************************************************************
+++ * 
+++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
+++ * 
+++ * Updated constants that changed from the previous VMWare VIX SDK
+++ * 
+++ * */
++ 
++ /* SIC is just a shortcut for entering integer constants into dict d: */
++ #define SIC(name) \
++@@ -71,12 +77,9 @@
++   SIC(VIX_E_HOST_USER_PERMISSIONS);
++   SIC(VIX_E_GUEST_USER_PERMISSIONS);
++   SIC(VIX_E_TOOLS_NOT_RUNNING);
++-  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
++-  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_VM);
++-  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
++-  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_VM);
++-  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_HOST);
++-  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_VM);
+++  SIC(VIX_E_GUEST_OPERATIONS_PROHIBITED);
+++  SIC(VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED);
+++  SIC(VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED);
++   SIC(VIX_E_MISSING_ANON_GUEST_ACCOUNT);
++   SIC(VIX_E_CANNOT_AUTHENTICATE_WITH_GUEST);
++   SIC(VIX_E_UNRECOGNIZED_COMMAND_IN_GUEST);
++diff -Naur ../pyvix/CVS/Entries ./CVS/Entries
++--- ../pyvix/CVS/Entries	2008-04-22 18:33:56.000000000 -0500
+++++ ./CVS/Entries	2008-04-22 18:36:15.000000000 -0500
++@@ -1,22 +1,23 @@
++-/MANIFEST/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/MANIFEST.in/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/__init__.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
++-/_support.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
++-/_vixmodule.c/1.1.1.1/Wed Jun 28 03:24:28 2006//
++-/_vixmodule.h/1.1.1.1/Wed Jun 28 03:24:28 2006//
+++/MANIFEST/1.1.1.1/Sat Apr 19 18:05:15 2008//
+++/MANIFEST.in/1.1.1.1/Sat Apr 19 18:05:14 2008//
+++/__init__.py/1.1.1.1/Sat Apr 19 18:05:15 2008//
+++/_support.py/1.1.1.1/Sat Apr 19 18:05:14 2008//
+++/_vixmodule.c/1.1.1.1/Sat Apr 19 18:05:15 2008//
+++/_vixmodule.h/1.1.1.1/Sat Apr 19 18:05:14 2008//
++ /callback_accumulator.c/1.1.1.1/Wed Jun 28 03:24:21 2006//
++ /constants.c/1.1.1.1/Wed Jun 28 03:24:22 2006//
+++D/docs////
++ /error_handling.c/1.1.1.1/Wed Jun 28 03:24:22 2006//
++ /host.c/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/lifo_linked_list.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/lock_manip.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/memory_systems.h/1.1.1.1/Wed Jun 28 03:24:23 2006//
++-/setup.cfg/1.1.1.1/Wed Jun 28 03:24:23 2006//
+++/lifo_linked_list.h/1.1.1.1/Sat Apr 19 18:05:14 2008//
+++/lock_manip.h/1.1.1.1/Sat Apr 19 18:05:15 2008//
+++/memory_systems.h/1.1.1.1/Sat Apr 19 18:05:15 2008//
+++/setup.cfg/1.1.1.1/Sat Apr 19 18:05:14 2008//
++ /setup.py/1.2/Wed Jul 12 14:42:06 2006//
++-/snapshot.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
++-/stateful_handle_wrapper.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
+++/snapshot.c/1.1.1.1/Sat Apr 19 18:05:14 2008//
+++/stateful_handle_wrapper.c/1.1.1.1/Sat Apr 19 18:05:14 2008//
+++D/tests////
++ /util.c/1.1.1.1/Wed Jun 28 03:24:25 2006//
++ /version.txt/1.2/Tue Jul 18 14:37:53 2006//
++ /vix.py/1.3/Tue Jul 18 14:37:53 2006//
++-/vm.c/1.1.1.1/Wed Jun 28 03:24:28 2006//
++-D
+++/vm.c/1.1.1.1/Sat Apr 19 21:57:58 2008//
++diff -Naur ../pyvix/CVS/Entries.Log ./CVS/Entries.Log
++--- ../pyvix/CVS/Entries.Log	2008-04-22 18:34:18.000000000 -0500
+++++ ./CVS/Entries.Log	1969-12-31 17:00:00.000000000 -0700
++@@ -1,2 +0,0 @@
++-A D/docs////
++-A D/tests////
++diff -Naur ../pyvix/docs/CVS/Entries ./docs/CVS/Entries
++--- ../pyvix/docs/CVS/Entries	2008-04-22 18:33:56.000000000 -0500
+++++ ./docs/CVS/Entries	2008-04-22 18:36:15.000000000 -0500
++@@ -1,3 +1,2 @@
++-/changelog.txt/1.1/Tue Jul 18 14:37:53 2006//
++-/license.txt/1.1.1.1/Wed Jun 28 03:24:28 2006//
++-D
+++/changelog.txt/1.1/Sat Apr 19 18:05:15 2008//
+++/license.txt/1.1.1.1/Sat Apr 19 18:05:15 2008//
++diff -Naur ../pyvix/error_handling.c ./error_handling.c
++--- ../pyvix/error_handling.c	2006-06-27 22:24:22.000000000 -0500
+++++ ./error_handling.c	2008-04-22 18:36:15.000000000 -0500
++@@ -69,12 +69,9 @@
++   switch (err) {
++     case VIX_E_HOST_USER_PERMISSIONS:
++     case VIX_E_GUEST_USER_PERMISSIONS:
++-    case VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
++-    case VIX_E_GUEST_OPERATIONS_PROHIBITED_ON_VM:
++-    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
++-    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED_ON_VM:
++-    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_HOST:
++-    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED_ON_VM:
+++    case VIX_E_GUEST_OPERATIONS_PROHIBITED:
+++    case VIX_E_ANON_GUEST_OPERATIONS_PROHIBITED:
+++    case VIX_E_ROOT_GUEST_OPERATIONS_PROHIBITED:
++     case VIX_E_MISSING_ANON_GUEST_ACCOUNT:
++     case VIX_E_CANNOT_AUTHENTICATE_WITH_GUEST:
++       excType = VIXSecurityException;
++diff -Naur ../pyvix/host.c ./host.c
++--- ../pyvix/host.c	2006-06-27 22:24:23.000000000 -0500
+++++ ./host.c	2008-04-22 18:36:15.000000000 -0500
++@@ -161,7 +161,7 @@
++ 
++   HOST_REQUIRE_OPEN(self);
++ 
++-  if (VixCallbackAccumulator_init(&acc) != SUCCEEDED) { goto fail; }
+++  if (VixCallbackAccumulator_ListInit(&acc) != SUCCEEDED) { goto fail; }
++ 
++   LEAVE_PYTHON
++   jobH = VixHost_FindItems(self->handle, VIX_FIND_RUNNING_VMS,
++diff -Naur ../pyvix/__init__.pyc ./__init__.pyc
++--- ../pyvix/__init__.pyc	2008-04-22 19:05:53.000000000 -0500
+++++ ./__init__.pyc	1969-12-31 17:00:00.000000000 -0700
++@@ -1,2 +0,0 @@
++-³ò
++-lö¡Dc           @   s   d  S(   N(    (    (    (    s   pyvix/__init__.pys   <module>   s    
++\ No newline at end of file
++diff -Naur ../pyvix/.project ./.project
++--- ../pyvix/.project	1969-12-31 17:00:00.000000000 -0700
+++++ ./.project	2008-04-22 18:36:15.000000000 -0500
++@@ -0,0 +1,81 @@
+++<?xml version="1.0" encoding="UTF-8"?>
+++<projectDescription>
+++	<name>pyvix</name>
+++	<comment></comment>
+++	<projects>
+++	</projects>
+++	<buildSpec>
+++		<buildCommand>
+++			<name>org.eclipse.cdt.managedbuilder.core.genmakebuilder</name>
+++			<triggers>clean,full,incremental,</triggers>
+++			<arguments>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.cleanBuildTarget</key>
+++					<value>clean</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.enableCleanBuild</key>
+++					<value>true</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>?name?</key>
+++					<value></value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.append_environment</key>
+++					<value>true</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.stopOnError</key>
+++					<value>true</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.buildCommand</key>
+++					<value>make</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.contents</key>
+++					<value>org.eclipse.cdt.make.core.activeConfigSettings</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.buildLocation</key>
+++					<value>${workspace_loc:/pyvix/Debug}</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.useDefaultBuildCmd</key>
+++					<value>true</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.enableAutoBuild</key>
+++					<value>false</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.enableFullBuild</key>
+++					<value>true</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.buildArguments</key>
+++					<value></value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.fullBuildTarget</key>
+++					<value>all</value>
+++				</dictionary>
+++				<dictionary>
+++					<key>org.eclipse.cdt.make.core.autoBuildTarget</key>
+++					<value>all</value>
+++				</dictionary>
+++			</arguments>
+++		</buildCommand>
+++		<buildCommand>
+++			<name>org.eclipse.cdt.managedbuilder.core.ScannerConfigBuilder</name>
+++			<arguments>
+++			</arguments>
+++		</buildCommand>
+++	</buildSpec>
+++	<natures>
+++		<nature>org.eclipse.cdt.managedbuilder.core.ScannerConfigNature</nature>
+++		<nature>org.eclipse.cdt.managedbuilder.core.managedBuildNature</nature>
+++		<nature>org.eclipse.cdt.core.cnature</nature>
+++	</natures>
+++</projectDescription>
+diff -Naur ../pyvix/setup.py ./setup.py
+--- ../pyvix/setup.py	2006-07-12 09:42:06.000000000 -0500
++++ ./setup.py	2008-04-22 18:36:15.000000000 -0500
+@@ -166,8 +166,8 @@
+     extraCompilerArgs.append('-fno-strict-aliasing')
+ 
+ if not PLATFORM_IS_WINDOWS:
+-    includeDirs.append('/usr/include/vmware-vix')
+-    libNames.append('vmware-vix')
++    includeDirs.append('/usr/include/vmware-vix/')
++    libNames.append('vixAllProducts')
+ 
+ 
+ extensionModules.append(
+diff -Naur ../pyvix/_support.pyc ./_support.pyc
+--- ../pyvix/_support.pyc	2008-04-22 19:05:53.000000000 -0500
++++ ./_support.pyc	1969-12-31 17:00:00.000000000 -0700
+@@ -1,7 +0,0 @@
+-³ò
+-lö¡Dc           @   s=   d  d k  Z d  d k Z e i i ƒ  i d ƒ Z d „  Z d S(   iÿÿÿÿNt   winc          C   sÛ   t  oÐ d d  k }  |  i d  |  i ƒ } zA |  i | d ƒ } z |  i | d ƒ d } Wd  |  i | ƒ XWd  | i ƒ  Xt	 i
+- i | t	 i d ƒ } | i t	 i ƒ o | t t	 i ƒ  } n t	 i
+- i | ƒ } | Sn d  S(   Niÿÿÿÿs#   SOFTWARE\VMware, Inc.\VMware Servert   InstallPathi    s
+-   VMware VIX(   t   PLATFORM_IS_WINDOWSt   _winregt   ConnectRegistryt   Nonet   HKEY_LOCAL_MACHINEt   OpenKeyt   QueryValueExt   CloseKeyt   Closet   ost   patht   joint   pardirt   endswitht   sept   lent   normpath(   R   t   rt   serverInstKeyt   serverInstDirt   vixDir(    (    s   pyvix/_support.pyt
+-   findVixDir	   s"    			(   t   os.pathR   t   syst   platformt   lowert
+-   startswithR   R   (    (    (    s   pyvix/_support.pys   <module>   s   
+\ No newline at end of file
+diff -Naur ../pyvix/tests/CVS/Entries ./tests/CVS/Entries
+--- ../pyvix/tests/CVS/Entries	2008-04-22 18:34:18.000000000 -0500
++++ ./tests/CVS/Entries	2008-04-22 18:36:15.000000000 -0500
+@@ -1,4 +1,4 @@
+-/_support.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-/test_host.py/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-/test_vm.py/1.2/Tue Jul 18 14:37:53 2006//
+-D
++/_support.py/1.1.1.1/Sat Apr 19 18:05:14 2008//
++D/data////
++/test_host.py/1.1.1.1/Sat Apr 19 18:05:14 2008//
++/test_vm.py/1.2/Sat Apr 19 18:05:15 2008//
+diff -Naur ../pyvix/tests/CVS/Entries.Log ./tests/CVS/Entries.Log
+--- ../pyvix/tests/CVS/Entries.Log	2008-04-22 18:34:23.000000000 -0500
++++ ./tests/CVS/Entries.Log	1969-12-31 17:00:00.000000000 -0700
+@@ -1 +0,0 @@
+-A D/data////
+diff -Naur ../pyvix/tests/data/CVS/Entries ./tests/data/CVS/Entries
+--- ../pyvix/tests/data/CVS/Entries	2008-04-22 18:34:23.000000000 -0500
++++ ./tests/data/CVS/Entries	2008-04-22 18:36:15.000000000 -0500
+@@ -1,2 +1 @@
+-/pyvix_test_program__hello.bat/1.1.1.1/Wed Jun 28 03:24:28 2006//
+-D
++/pyvix_test_program__hello.bat/1.1.1.1/Sat Apr 19 18:05:14 2008//
+diff -Naur ../pyvix/util.c ./util.c
+--- ../pyvix/util.c	2006-06-27 22:24:25.000000000 -0500
++++ ./util.c	2008-04-22 18:36:15.000000000 -0500
+@@ -2,7 +2,15 @@
+  * pyvix - Miscellaneous Utility Code
+  * Copyright 2006 David S. Rushby
+  * Available under the MIT license (see docs/license.txt for details).
+- *****************************************************************************/
++ ****************************************************************************
++ * 
++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
++ * 
++ * Testing was not fully performed.  In most cases, functional testing was
++ * applied.  
++ * 
++ * Added support for a extracting Nth Elements from data
++ * */
+ 
+ static PyObject *pyf_extractProperty(VixHandle h, VixPropertyID propID) {
+   /* Looks up the specified property propID on handle h, then converts the C
+@@ -73,3 +81,73 @@
+     Py_XDECREF(pyProp);
+     return NULL;
+ } /* pyf_extractProperty */
++
++static PyObject *pyf_extractNthProperty(VixHandle h, VixPropertyID propID, unsigned int index) {
++  /* Looks up the specified property propID on handle h, then converts the C
++   * property value to an appropriate Python object. */
++  PyObject *pyProp = NULL;
++  VixError err = VIX_OK;
++  VixPropertyType propType = VIX_PROPERTYTYPE_ANY;
++
++  err = Vix_GetPropertyType(h, propID, &propType);
++  CHECK_VIX_ERROR(err);
++
++  switch (propType) {
++    case VIX_PROPERTYTYPE_STRING: {
++      char *s = NULL;
++      err = VixJob_GetNthProperties(h, index, propID, &s, VIX_PROPERTY_NONE);
++      if (VIX_FAILED(err)) {
++        autoRaiseVIXError(err);
++        pyvix_vix_buffer_free(s);
++        goto fail;
++      } else {
++        assert (s != NULL);
++        pyProp = PyString_FromString(s);
++        pyvix_vix_buffer_free(s);
++        if (pyProp == NULL) { goto fail; }
++      }
++      break;
++    }
++
++    case VIX_PROPERTYTYPE_INTEGER: {
++      int i;
++      err = VixJob_GetNthProperties(h, index, propID, &i, VIX_PROPERTY_NONE);
++      CHECK_VIX_ERROR(err);
++      pyProp = PyInt_FromLong(i);
++      if (pyProp == NULL) { goto fail; }
++      break;
++    }
++
++    case VIX_PROPERTYTYPE_INT64: {
++      int64 i;
++      err = VixJob_GetNthProperties(h, index, propID, &i, VIX_PROPERTY_NONE);
++      CHECK_VIX_ERROR(err);
++      pyProp = PythonIntOrLongFrom64BitValue(i);
++      if (pyProp == NULL) { goto fail; }
++      break;
++    }
++
++    case VIX_PROPERTYTYPE_BOOL: {
++      int i;
++      err = VixJob_GetNthProperties(h, index, propID, &i, VIX_PROPERTY_NONE);
++      CHECK_VIX_ERROR(err);
++      pyProp = PyBool_FromLong(i);
++      if (pyProp == NULL) { goto fail; }
++      break;
++    }
++
++    default:
++      raiseNonNumericVIXError(VIXInternalError,
++          "Unable to extract this property type."
++        );
++      goto fail;
++  }
++
++  assert (!PyErr_Occurred());
++  assert (pyProp != NULL);
++  return pyProp;
++  fail:
++    assert (PyErr_Occurred());
++    Py_XDECREF(pyProp);
++    return NULL;
++} /* pyf_extractNthProperty */
+diff -Naur ../pyvix/version.txt ./version.txt
+--- ../pyvix/version.txt	2006-07-18 09:37:53.000000000 -0500
++++ ./version.txt	2008-04-22 18:36:15.000000000 -0500
+@@ -1 +1 @@
+-2006.07.18
+\ No newline at end of file
++2008.04.22
+\ No newline at end of file
+diff -Naur ../pyvix/vix.py ./vix.py
+--- ../pyvix/vix.py	2006-07-18 09:37:53.000000000 -0500
++++ ./vix.py	2008-04-22 18:36:15.000000000 -0500
+@@ -2,7 +2,7 @@
+ # Copyright 2006 David S. Rushby
+ # Available under the MIT license (see docs/license.txt for details).
+ 
+-__timestamp__ = '2006.07.18.14.26.22.UTC'
++__timestamp__ = '2008.04.22.23.23.06.UTC'
+ 
+ import os
+ 
+@@ -14,6 +14,7 @@
+     _vixDir = _support.findVixDir()
+     os.environ['PATH'] = _vixDir + os.pathsep + os.environ['PATH']
+ 
++
+ import _vixmodule as _v # The underlying C module.
+ 
+ # Load the essential VIX C API constants into the namespace of this module:
+diff -Naur ../pyvix/vix.pyc ./vix.pyc
+--- ../pyvix/vix.pyc	2008-04-22 19:05:53.000000000 -0500
++++ ./vix.pyc	1969-12-31 17:00:00.000000000 -0700
+@@ -1,6 +0,0 @@
+-³ò
+-Aò¼Dc           @   s¶   d  Z  d d k Z d d k Z e i o/ e i ƒ  Z e e i e i d e i d <n d d k Z	 e	 i
+- e ƒ  ƒ e	 i Z e	 i Z e	 i Z e	 i Z e	 i Z e	 i Z e	 i Z d S(   s   2006.07.18.14.26.22.UTCiÿÿÿÿNt   PATH(   t   __timestamp__t   ost   _supportt   PLATFORM_IS_WINDOWSt
+-   findVixDirt   _vixDirt   pathsept   environt
+-   _vixmodulet   _vt   initSupport_Constantst   globalst   VIXExceptiont   VIXInternalErrort   VIXSecurityExceptiont   VIXClientProgrammerErrort   Hostt   VMt   Snapshot(    (    (    s   pyvix/vix.pys   <module>   s   
+-#						
+\ No newline at end of file
+diff -Naur ../pyvix/vm.c ./vm.c
+--- ../pyvix/vm.c	2006-06-27 22:24:28.000000000 -0500
++++ ./vm.c	2008-04-22 19:24:02.000000000 -0500
+@@ -2,86 +2,121 @@
+  * pyvix - Implementation of VM Class
+  * Copyright 2006 David S. Rushby
+  * Available under the MIT license (see docs/license.txt for details).
+- *****************************************************************************/
++ ****************************************************************************
++ * 
++ * Updated 4/22/2008 Adam Pridgen Adam.Pridgen@[foundstone.com || gmail.com]
++ * 
++ * Testing was not fully performed.  In most cases, functional testing was
++ * applied.  
++ * 
++ * Added support for a API:
++ * 
++ * VixVM_AddSharedFolder
++ * VixVM_CreateDirectoryInGuest
++ * VixVM_CreateTempFileInGuest
++ * VixVM_DeleteDirectoryInGuest
++ * VixVM_DeleteFileInGuest
++ * VixVM_DirectoryExistsInGuest
++ * VixVM_EnableSharedFolders
++ * VixVM_FileExistsInGuest
++ * VixVM_GetCurrentSnapshot
++ * VixVM_GetNamedSnapshot
++ * VixVM_GetNumSharedFolders
++ * VixVM_GetSharedFolderState
++ * VixVM_KillProcessInGuest
++ * VixVM_ListDirectoryInGuest
++ * VixVM_ListProcessesInGuest
++ * VixVM_LoginInGuest
++ * VixVM_LogoutFromGuest
++ * VixVM_OpenUrlInGuest
++ * VixVM_PowerOn - Updated to allow for options
++ * VixVM_RemoveSharedFolder
++ * VixVM_RemoveSnapshot - Updated to allow for options
++ * VixVM_RenameFileInGuest
++ * VixVM_RevertToSnapshot - Updated to allow for options
++ * VixVM_RunProgramInGuest
++ * VixVM_RunScriptInGuest
++ * VixVM_SetSharedFolderState
++ */
+ 
+ /* VMTracker method declarations: */
+ static status VMTracker_add(VMTracker **list_slot, VM *cont);
+ static status VMTracker_remove(VMTracker **list_slot, VM *cont, bool);
+ 
+ #define VM_REQUIRE_OPEN(vm) \
+-  SHW_REQUIRE_OPEN((StatefulHandleWrapper *) (vm))
++	SHW_REQUIRE_OPEN((StatefulHandleWrapper *) (vm))
+ #define VM_isOpen StatefulHandleWrapper_isOpen
+ #define VM_changeState(vm, newState) \
+-  StatefulHandleWrapper_changeState((StatefulHandleWrapper *) (vm), newState)
++	StatefulHandleWrapper_changeState((StatefulHandleWrapper *) (vm), newState)
+ 
+ 
+ static status initSupport_VM(void) {
+-  /* VMType is a new-style class, so PyType_Ready must be called before its
+-   * getters and setters will function. */
+-  if (PyType_Ready(&VMType) < 0) { goto fail; }
+-
+-  return SUCCEEDED;
+-  fail:
+-    /* This function is indirectly called by the module loader, which makes no
+-     * provision for error recovery. */
+-    return FAILED;
++	/* VMType is a new-style class, so PyType_Ready must be called before its
++	 * getters and setters will function. */
++	if (PyType_Ready(&VMType) < 0) { goto fail; }
++
++	return SUCCEEDED;
++	fail:
++	/* This function is indirectly called by the module loader, which makes no
++	 * provision for error recovery. */
++	return FAILED;
+ } /* initSupport_VM */
+ 
+ static PyObject *pyf_VM_new(
+-    PyTypeObject *subtype, PyObject *args, PyObject *kwargs
+-  )
++		PyTypeObject *subtype, PyObject *args, PyObject *kwargs
++)
+ {
+-  VM *self = (VM *) StatefulHandleWrapper_new(subtype);
+-  if (self == NULL) { goto fail; }
++	VM *self = (VM *) StatefulHandleWrapper_new(subtype);
++	if (self == NULL) { goto fail; }
+ 
+-  /* Initialize VM-specific fields: */
+-  self->host = NULL;
++	/* Initialize VM-specific fields: */
++	self->host = NULL;
+ 
+-  return (PyObject *) self;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (self == NULL);
+-    return NULL;
++	return (PyObject *) self;
++	fail:
++	assert (PyErr_Occurred());
++	assert (self == NULL);
++	return NULL;
+ } /* pyf_VM_new */
+ 
+ static status VM_init(VM *self, PyObject *args) {
+-  status res = FAILED;
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-
+-  Host *host;
+-  char *vmxPath;
+-
+-  if (!PyArg_ParseTuple(args, "O!s", &HostType, &host, &vmxPath)) { goto fail; }
+-
+-  assert (self->host == NULL);
+-  Py_INCREF(host);
+-  self->host = host;
+-
+-  assert (self->handle == VIX_INVALID_HANDLE);
+-  LEAVE_PYTHON
+-  jobH = VixVM_Open(host->handle, vmxPath, NULL, NULL);
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_JOB_RESULT_HANDLE, &self->handle,
+-      VIX_PROPERTY_NONE
+-    );
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  assert (self->state == STATE_CREATED);
+-  if (VM_changeState(self, STATE_OPEN) != SUCCEEDED) { goto fail; }
+-
+-  /* Enter self in the host's open VM tracker: */
+-  if (VMTracker_add(&host->openVMs, self) != SUCCEEDED) { goto fail; }
+-
+-  res = SUCCEEDED;
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (res == FAILED);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return res;
++	status res = FAILED;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++
++	Host *host;
++	char *vmxPath;
++
++	if (!PyArg_ParseTuple(args, "O!s", &HostType, &host, &vmxPath)) { goto fail; }
++
++	assert (self->host == NULL);
++	Py_INCREF(host);
++	self->host = host;
++
++	assert (self->handle == VIX_INVALID_HANDLE);
++	LEAVE_PYTHON
++	jobH = VixVM_Open(host->handle, vmxPath, NULL, NULL);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_JOB_RESULT_HANDLE, &self->handle,
++			VIX_PROPERTY_NONE
++	);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	assert (self->state == STATE_CREATED);
++	if (VM_changeState(self, STATE_OPEN) != SUCCEEDED) { goto fail; }
++
++	/* Enter self in the host's open VM tracker: */
++	if (VMTracker_add(&host->openVMs, self) != SUCCEEDED) { goto fail; }
++
++	res = SUCCEEDED;
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (res == FAILED);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return res;
+ } /* VM_init */
+ 
+ #define VM_clearHostReferences(vm) Py_CLEAR((vm)->host)
+@@ -89,818 +124,1686 @@
+ #define VM_hasBeenUntracked(vm) ((vm)->host == NULL)
+ 
+ static status VM_close_withoutUnlink(VM *self, bool allowedToRaise) {
+-  if (self->openSnapshots != NULL) {
+-    if (SnapshotTracker_release(&self->openSnapshots) == SUCCEEDED) {
+-      assert (self->openSnapshots == NULL);
+-    } else {
+-      if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
+-    }
+-  }
+-
+-  if (self->state == STATE_OPEN && self->handle != VIX_INVALID_HANDLE) {
+-    LEAVE_PYTHON
+-    Vix_ReleaseHandle(self->handle);
+-    self->handle = VIX_INVALID_HANDLE;
+-    ENTER_PYTHON
+-  }
+-
+-  assert (self->handle == VIX_INVALID_HANDLE);
+-  if (VM_changeState(self, STATE_CLOSED) != SUCCEEDED) { goto fail; }
+-
+-  return SUCCEEDED;
+-  fail:
+-    assert (PyErr_Occurred());
+-    return FAILED;
++	if (self->openSnapshots != NULL) {
++		if (SnapshotTracker_release(&self->openSnapshots) == SUCCEEDED) {
++			assert (self->openSnapshots == NULL);
++		} else {
++			if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
++		}
++	}
++
++	if (self->state == STATE_OPEN && self->handle != VIX_INVALID_HANDLE) {
++		LEAVE_PYTHON
++		Vix_ReleaseHandle(self->handle);
++		self->handle = VIX_INVALID_HANDLE;
++		ENTER_PYTHON
++	}
++
++	assert (self->handle == VIX_INVALID_HANDLE);
++	if (VM_changeState(self, STATE_CLOSED) != SUCCEEDED) { goto fail; }
++
++	return SUCCEEDED;
++	fail:
++	assert (PyErr_Occurred());
++	return FAILED;
+ } /* VM_close_withoutUnlink */
+ 
+ static status VM_close_withUnlink(VM *self, bool allowedToRaise) {
+-  /* Since the caller is asking us to unlink, self should still have a host,
+-   * and self should be present in the host's open VM tracker. */
+-  assert (self->host != NULL);
+-  assert (self->host->openVMs != NULL);
+-
+-  if (VM_close_withoutUnlink(self, allowedToRaise) == SUCCEEDED) {
+-    assert (self->state == STATE_CLOSED);
+-  } else {
+-    if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
+-  }
+-
+-  /* Remove self from the host's open VM tracker: */
+-  if (VMTracker_remove(&self->host->openVMs, self, true) != SUCCEEDED) {
+-    if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
+-  }
+-
+-  VM_clearHostReferences(self);
+-
+-  assert (VM_hasBeenUntracked(self));
+-  return SUCCEEDED;
+-  fail:
+-    assert (PyErr_Occurred());
+-    return FAILED;
++	/* Since the caller is asking us to unlink, self should still have a host,
++	 * and self should be present in the host's open VM tracker. */
++	assert (self->host != NULL);
++	assert (self->host->openVMs != NULL);
++
++	if (VM_close_withoutUnlink(self, allowedToRaise) == SUCCEEDED) {
++		assert (self->state == STATE_CLOSED);
++	} else {
++		if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
++	}
++
++	/* Remove self from the host's open VM tracker: */
++	if (VMTracker_remove(&self->host->openVMs, self, true) != SUCCEEDED) {
++		if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
++	}
++
++	VM_clearHostReferences(self);
++
++	assert (VM_hasBeenUntracked(self));
++	return SUCCEEDED;
++	fail:
++	assert (PyErr_Occurred());
++	return FAILED;
+ } /* VM_close_withUnlink */
+ 
+ static PyObject *pyf_VM_close(VM *self, PyObject *args) {
+-  VM_REQUIRE_OPEN(self);
+-  if (VM_close_withUnlink(self, true) != SUCCEEDED) { goto fail; }
+-  Py_RETURN_NONE;
+-  fail:
+-    assert (PyErr_Occurred());
+-    return NULL;
++	VM_REQUIRE_OPEN(self);
++	if (VM_close_withUnlink(self, true) != SUCCEEDED) { goto fail; }
++	Py_RETURN_NONE;
++	fail:
++	assert (PyErr_Occurred());
++	return NULL;
+ } /* pyf_VM_close */
+ 
+ static PyObject *pyf_VM_closed_get(VM *self, void *closure) {
+-  return PyBool_FromLong(!VM_isOpen(self));
++	return PyBool_FromLong(!VM_isOpen(self));
+ } /* pyf_VM_closed_get */
+ 
+ static status VM_untrack(VM *self, bool allowedToRaise) {
+-  if (VM_close_withoutUnlink(self, allowedToRaise) != SUCCEEDED) {
+-    return FAILED;
+-  }
+-  assert (!VM_isOpen(self));
++	if (VM_close_withoutUnlink(self, allowedToRaise) != SUCCEEDED) {
++		return FAILED;
++	}
++	assert (!VM_isOpen(self));
+ 
+-  VM_clearHostReferences(self);
+-  assert (VM_hasBeenUntracked(self));
++	VM_clearHostReferences(self);
++	assert (VM_hasBeenUntracked(self));
+ 
+-  return SUCCEEDED;
++	return SUCCEEDED;
+ } /* VM_untrack */
+ 
+ static status VM_delete(VM *self, bool allowedToRaise) {
+-  if (self->state == STATE_OPEN) {
+-    if (VM_close_withUnlink(self, allowedToRaise) == SUCCEEDED) {
+-      assert (VM_hasBeenUntracked(self));
+-    } else {
+-      if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
+-    }
+-  }
+-
+-  return SUCCEEDED;
+-  fail:
+-    assert (PyErr_Occurred());
+-    return FAILED;
++	if (self->state == STATE_OPEN) {
++		if (VM_close_withUnlink(self, allowedToRaise) == SUCCEEDED) {
++			assert (VM_hasBeenUntracked(self));
++		} else {
++			if (allowedToRaise) { goto fail; } else { SUPPRESS_EXCEPTION; }
++		}
++	}
++
++	return SUCCEEDED;
++	fail:
++	assert (PyErr_Occurred());
++	return FAILED;
+ } /* VM_delete */
+ 
+ static void pyf_VM___del__(VM *self) {
+-  VM_delete(self, false);
++	VM_delete(self, false);
+ 
+-  /* Release the VM struct itself: */
+-  self->ob_type->tp_free((PyObject *) self);
++	/* Release the VM struct itself: */
++	self->ob_type->tp_free((PyObject *) self);
+ } /* pyf_VM___del__ */
+ 
+-static PyObject *pyf_VM_powerOnOrOff(VM *self, bool shouldPowerOn) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  if (shouldPowerOn) {
+-    jobH = VixVM_PowerOn(self->handle, VIX_VMPOWEROP_NORMAL,
+-        VIX_INVALID_HANDLE, NULL, NULL
+-      );
+-  } else {
+-    jobH = VixVM_PowerOff(self->handle, 0, NULL, NULL);
+-  }
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++static PyObject *pyf_VM_powerOnOrOff(VM *self,
++		PyObject *args, bool shouldPowerOn) {
++	
++	
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++	int options = VIX_VMPOWEROP_NORMAL;
++	
++	VM_REQUIRE_OPEN(self);
++	
++	if (!PyArg_ParseTuple(args, "|i",&options)) { goto fail; }
++	
++	if (options != VIX_VMPOWEROP_NORMAL && options != VIX_VMPOWEROP_LAUNCH_GUI){
++		options = VIX_VMPOWEROP_NORMAL; 
++	}
++	LEAVE_PYTHON
++	
++	
++	if (shouldPowerOn) {
++		jobH = VixVM_PowerOn(self->handle, options,
++				VIX_INVALID_HANDLE, NULL, NULL
++		);
++	} else {
++		jobH = VixVM_PowerOff(self->handle, 0, NULL, NULL);
++	}
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_powerOn */
+ 
+-static PyObject *pyf_VM_powerOn(VM *self) {
+-  return pyf_VM_powerOnOrOff(self, true);
++static PyObject *pyf_VM_powerOn(VM *self,
++		PyObject *args) {
++	
++	return pyf_VM_powerOnOrOff(self, args, true);
+ } /* pyf_VM_powerOn */
+ 
+-static PyObject *pyf_VM_powerOff(VM *self) {
+-  return pyf_VM_powerOnOrOff(self, false);
++static PyObject *pyf_VM_powerOff(VM *self,
++		PyObject *args) {
++	return pyf_VM_powerOnOrOff(self, args, false);
+ } /* pyf_VM_powerOn */
+ 
+ static PyObject *pyf_VM_reset(VM *self) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_Reset(self->handle,
+-      /* powerOnOptions:  Must be VIX_VMPOWEROP_NORMAL in current release: */
+-      VIX_VMPOWEROP_NORMAL,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_Reset(self->handle,
++			/* powerOnOptions:  Must be VIX_VMPOWEROP_NORMAL in current release: */
++			VIX_VMPOWEROP_NORMAL,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_reset */
+ 
+ static PyObject *pyf_VM_suspend(VM *self) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_Suspend(self->handle,
+-      /* powerOffOptions:  Must be VIX_VMPOWEROP_NORMAL in current release: */
+-      VIX_VMPOWEROP_NORMAL,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_Suspend(self->handle,
++			/* powerOffOptions:  Must be VIX_VMPOWEROP_NORMAL in current release: */
++			VIX_VMPOWEROP_NORMAL,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_suspend */
+ 
+ static PyObject *pyf_VM_upgradeVirtualHardware(VM *self) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_UpgradeVirtualHardware(self->handle,
+-      0, /* options:  Must be 0 in current release. */
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_UpgradeVirtualHardware(self->handle,
++			0, /* options:  Must be 0 in current release. */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_upgradeVirtualHardware */
+ 
+ static PyObject *pyf_VM_waitForToolsInGuest(VM *self, PyObject *args) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-  VixToolsState toolsState = VIX_TOOLSSTATE_UNKNOWN;
+-
+-  int timeoutSecs = NO_TIMEOUT;
+-
+-  VM_REQUIRE_OPEN(self);
+-  if (!PyArg_ParseTuple(args, "|i", &timeoutSecs)) { goto fail; }
+-
+-  LEAVE_PYTHON
+-  /* XXX: As of VMWare Server 1.0RC1, the timeout either doesn't work, or
+-   * requires the use of the async callback instead of VixJob_Wait.  At any
+-   * rate, the timeout doesn't work as expected at present. */
+-  jobH = VixVM_WaitForToolsInGuest(self->handle, timeoutSecs, NULL, NULL);
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  LEAVE_PYTHON
+-  err = Vix_GetProperties(self->handle, VIX_PROPERTY_VM_TOOLS_STATE,
+-      &toolsState, VIX_PROPERTY_NONE
+-    );
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  /* If the VM's "tools state" is still undefined even after the VixJob_Wait
+-   * call returned, then we timed out. */
+-  pyRes = PyBool_FromLong(toolsState != VIX_TOOLSSTATE_UNKNOWN);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++	VixToolsState toolsState = VIX_TOOLSSTATE_UNKNOWN;
++
++	int timeoutSecs = NO_TIMEOUT;
++
++	VM_REQUIRE_OPEN(self);
++	if (!PyArg_ParseTuple(args, "|i", &timeoutSecs)) { goto fail; }
++
++	LEAVE_PYTHON
++	/* XXX: As of VMWare Server 1.0RC1, the timeout either doesn't work, or
++	 * requires the use of the async callback instead of VixJob_Wait.  At any
++	 * rate, the timeout doesn't work as expected at present. */
++	jobH = VixVM_WaitForToolsInGuest(self->handle, timeoutSecs, NULL, NULL);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	LEAVE_PYTHON
++	err = Vix_GetProperties(self->handle, VIX_PROPERTY_VM_TOOLS_STATE,
++			&toolsState, VIX_PROPERTY_NONE
++	);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	/* If the VM's "tools state" is still undefined even after the VixJob_Wait
++	 * call returned, then we timed out. */
++	pyRes = PyBool_FromLong(toolsState != VIX_TOOLSSTATE_UNKNOWN);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_waitForToolsInGuest */
+ 
+ static PyObject *pyf_VM_installTools(VM *self) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_InstallTools(self->handle,
+-      0, /* options:  Must be 0 in current release. */
+-      NULL, /* commandLineArgs:  Must be NULL in current release. */
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_InstallTools(self->handle,
++			0, /* options:  Must be 0 in current release. */
++			NULL, /* commandLineArgs:  Must be NULL in current release. */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_installTools */
+ 
+ static PyObject *pyf_VM_delete(VM *self) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err = VIX_OK;
+-  PyObject *pyRes = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_Delete(self->handle,
+-      0, /* deleteOptions:  Must be 0 in current release. */
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_Delete(self->handle,
++			0, /* deleteOptions:  Must be 0 in current release. */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_delete */
+ 
+ static PyObject *pyf_VM_createSnapshot(VM *self,
+-    PyObject *args, PyObject *kwargs
+-  )
++		PyObject *args, PyObject *kwargs
++)
+ {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-  PyObject *pySnap = NULL;
+-  VixHandle snapH;
+-
+-  static char* kwarg_list[] = {"name", "description", "options", NULL};
+-  char *name = NULL;
+-  char *description = NULL;
+-  int options = 0;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|ssi", kwarg_list,
+-       &name, &description, &options
+-     ))
+-  { goto fail; }
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_CreateSnapshot(self->handle,
+-      name, description, options,
+-      /* propertyListHandle:  Must be VIX_INVALID_HANDLE in current release: */
+-      VIX_INVALID_HANDLE,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH,
+-      VIX_PROPERTY_JOB_RESULT_HANDLE, &snapH,
+-      VIX_PROPERTY_NONE
+-    );
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  assert (snapH != VIX_INVALID_HANDLE);
+-  pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
+-      "O" VixHandle_FUNCTION_CALL_CODE, self, snapH
+-    );
+-  /* If the creation of pySnap succeeded, the Snapshot instance now owns snapH;
+-   * if the creation failed, we need to release snapH: */
+-  if (pySnap == NULL) {
+-    Vix_ReleaseHandle(snapH);
+-    goto fail;
+-  }
+-
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    Py_XDECREF(pySnap);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pySnap;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pySnap = NULL;
++	VixHandle snapH;
++
++	static char* kwarg_list[] = {"name", "description", "options", NULL};
++	char *name = NULL;
++	char *description = NULL;
++	int options = 0;
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|ssi", kwarg_list,
++			&name, &description, &options
++	))
++	{ goto fail; }
++	
++	LEAVE_PYTHON
++	jobH = VixVM_CreateSnapshot(self->handle,
++			name, description, options,
++			/* propertyListHandle:  Must be VIX_INVALID_HANDLE in current release: */
++			VIX_INVALID_HANDLE,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH,
++			VIX_PROPERTY_JOB_RESULT_HANDLE, &snapH,
++			VIX_PROPERTY_NONE
++	);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	assert (snapH != VIX_INVALID_HANDLE);
++	pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
++			"O" VixHandle_FUNCTION_CALL_CODE, self, snapH
++	);
++	/* If the creation of pySnap succeeded, the Snapshot instance now owns snapH;
++	 * if the creation failed, we need to release snapH: */
++	if (pySnap == NULL) {
++		Vix_ReleaseHandle(snapH);
++		goto fail;
++	}
++
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	Py_XDECREF(pySnap);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pySnap;
+ } /* pyf_VM_createSnapshot */
+ 
+-static PyObject *pyf_VM_removeSnapshot(VM *self, PyObject *args) {
+-  PyObject *pyRes = NULL;
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-
+-  Snapshot *pySnap;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTuple(args, "O!", &SnapshotType, &pySnap)) { goto fail; }
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_RemoveSnapshot(self->handle,
+-      pySnap->handle,
+-      0, /* options:  Must be 0 in current release. */
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++static PyObject *pyf_VM_getNamedSnapshot(VM *self, PyObject *args)
++{
++	VixError err;
++	PyObject *pySnap = NULL;
++	VixHandle snapH;
++
++	char *snapshotname = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &snapshotname)) { goto fail;}
++	
++	printf("snapshotname: %s",snapshotname);
++	LEAVE_PYTHON
++	err = VixVM_GetNamedSnapshot(self->handle,
++			snapshotname,
++			&snapH);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++	if (snapH != VIX_INVALID_HANDLE){goto fail;}
++	
++	pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
++			"O" VixHandle_FUNCTION_CALL_CODE, self, snapH
++	);
++	/* If the creation of pySnap succeeded, the Snapshot instance now owns snapH;
++	 * if the creation failed, we need to release snapH: */
++	if (pySnap == NULL) {
++		Vix_ReleaseHandle(snapH);
++		goto fail;
++	}
++
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	if (pySnap != NULL) {Py_XDECREF(pySnap);}
++	pySnap = Py_None;
++	Py_INCREF(Py_None);
++	/* Fall through to cleanup: */
++	cleanup:
++	return pySnap;
++} /* pyf_VM_getNamedSnapshot */
++
++static PyObject *pyf_VM_getCurrentSnapshot(VM *self, PyObject *args)
++{
++	VixError err;
++	PyObject *pySnap = NULL;
++	
++	VixHandle snapH;  
++
++	VM_REQUIRE_OPEN(self);
++	LEAVE_PYTHON
++	err = VixVM_GetCurrentSnapshot(self->handle, &snapH);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	if (snapH != VIX_INVALID_HANDLE){goto fail; }
++	
++	pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
++			"O" VixHandle_FUNCTION_CALL_CODE, self, snapH);
++	/* If the creation of pySnap succeeded, the Snapshot instance now owns snapH;
++	 * if the creation failed, we need to release snapH: */
++	if (pySnap == NULL) {
++		Vix_ReleaseHandle(snapH);
++		goto fail;
++	}
++
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	if (pySnap != NULL) {Py_XDECREF(pySnap);}
++	Py_XDECREF(pySnap);
++	pySnap = Py_None;
++	Py_INCREF(Py_None);
++		
++	/* Fall through to cleanup: */
++	cleanup:
++	return pySnap;
++} /* pyf_VM_getCurrentSnapshot */
++
++static PyObject *pyf_VM_removeSnapshot(VM *self, PyObject *args){
++	PyObject *pyRes = NULL;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	
++	Snapshot *pySnap;
++	int options = 0;
++	VM_REQUIRE_OPEN(self);
++	
++	
++	if (!PyArg_ParseTuple(args, "O!|i", &SnapshotType, &pySnap, &options))
++		{ goto fail; }
++	
++	
++	if (options != 0 && options != VIX_SNAPSHOT_REMOVE_CHILDREN) {options = 0;}
++	LEAVE_PYTHON
++	jobH = VixVM_RemoveSnapshot(self->handle,
++			pySnap->handle,
++			options, /* options:  Must be 0 in current release. */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_removeSnapshot */
+ 
+-static PyObject *pyf_VM_revertToSnapshot(VM *self, PyObject *args) {
+-  PyObject *pyRes = NULL;
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-
+-  Snapshot *pySnap;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTuple(args, "O!", &SnapshotType, &pySnap)) { goto fail; }
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_RevertToSnapshot(self->handle,
+-      pySnap->handle,
+-      0, /* options:  Must be 0 in current release. */
+-      /* propertyListHandle:  Must be VIX_INVALID_HANDLE in current release: */
+-      VIX_INVALID_HANDLE,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++static PyObject *pyf_VM_revertToSnapshot(VM *self, PyObject *args, PyObject *kwargs) {
++	PyObject *pyRes = NULL;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++
++	Snapshot *pySnap;
++	int options = VIX_VMPOWEROP_NORMAL;
++	VM_REQUIRE_OPEN(self);
++
++	
++	
++	if (!PyArg_ParseTuple(args, "O!|i",&SnapshotType, 
++						&pySnap, &options))
++		{ goto fail; }
++	
++	if (options & VIX_VMPOWEROP_SUPPRESS_SNAPSHOT_POWERON){
++		options = VIX_VMPOWEROP_SUPPRESS_SNAPSHOT_POWERON;
++	}
++	LEAVE_PYTHON
++	jobH = VixVM_RevertToSnapshot(self->handle,
++			pySnap->handle,
++			options, /* options:  Must be 0 in current release. */
++			/* propertyListHandle:  Must be VIX_INVALID_HANDLE in current release: */
++			VIX_INVALID_HANDLE,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_revertToSnapshot */
+ 
+ static PyObject *pyf_VM_loginInGuest(VM *self,
+-    PyObject *args, PyObject *kwargs
+-  )
++		PyObject *args, PyObject *kwargs
++)
+ {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-  PyObject *pyRes = NULL;
+-
+-  static char* kwarg_list[] = {"username", "password", "options", NULL};
+-  char *username = NULL;
+-  char *password = NULL;
+-  int options = 0;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i", kwarg_list,
+-       &username, &password, &options
+-     ))
+-  { goto fail; }
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_LoginInGuest(self->handle,
+-      username, password, options,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	static char* kwarg_list[] = {"username", "password", "options", NULL};
++	char *username = NULL;
++	char *password = NULL;
++	int options = 0;
++
++	VM_REQUIRE_OPEN(self);
++	/* fixed to allow for blank passwords, cause you know users use them :) atp*/
++	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|si", kwarg_list,
++			&username, &password, &options
++	))
++	{ 
++		goto fail; 
++	}
++	if (password == NULL) {password = "";}
++			
++			
++	LEAVE_PYTHON
++	jobH = VixVM_LoginInGuest(self->handle,
++			username, password, options,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_loginInGuest */
++static PyObject *pyf_VM_logoutFromGuest(VM *self,
++		PyObject *args, PyObject *kwargs
++)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	jobH = VixVM_LogoutFromGuest(self->handle,
++            NULL, // callbackProc
++            NULL); // clientData
++
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_logoutFromGuest */
+ 
+ static PyObject *pyf_VM_copyFile(VM *self, PyObject *args,
+-    bool fromHostToGuest
+-  )
++		bool fromHostToGuest
++)
+ {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-  PyObject *pyRes = NULL;
+-
+-  char *src;
+-  char *dest;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTuple(args, "ss", &src, &dest)) { goto fail; }
+-
+-  LEAVE_PYTHON
+-  if (fromHostToGuest) {
+-    jobH = VixVM_CopyFileFromHostToGuest(self->handle,
+-        src, dest,
+-        0, /* options:  Must be 0 in current release. */
+-        /* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
+-        VIX_INVALID_HANDLE,
+-        NULL, /* callbackProc */
+-        NULL  /* clientData */
+-      );
+-  } else {
+-    jobH = VixVM_CopyFileFromGuestToHost(self->handle,
+-        src, dest,
+-        0, /* options:  Must be 0 in current release. */
+-        /* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
+-        VIX_INVALID_HANDLE,
+-        NULL, /* callbackProc */
+-        NULL  /* clientData */
+-      );
+-  }
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *src;
++	char *dest;
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "ss", &src, &dest)) { goto fail; }
++
++	LEAVE_PYTHON
++	if (fromHostToGuest) {
++		jobH = VixVM_CopyFileFromHostToGuest(self->handle,
++				src, dest,
++				0, /* options:  Must be 0 in current release. */
++				/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++				VIX_INVALID_HANDLE,
++				NULL, /* callbackProc */
++				NULL  /* clientData */
++		);
++	} else {
++		jobH = VixVM_CopyFileFromGuestToHost(self->handle,
++				src, dest,
++				0, /* options:  Must be 0 in current release. */
++				/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++				VIX_INVALID_HANDLE,
++				NULL, /* callbackProc */
++				NULL  /* clientData */
++		);
++	}
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
+ } /* pyf_VM_copyFile */
+ 
+ static PyObject *pyf_VM_copyFileFromHostToGuest(VM *self, PyObject *args) {
+-  return pyf_VM_copyFile(self, args, true);
++	return pyf_VM_copyFile(self, args, true);
+ } /* pyf_VM_copyFileFromHostToGuest */
+ 
+ static PyObject *pyf_VM_copyFileFromGuestToHost(VM *self, PyObject *args) {
+-  return pyf_VM_copyFile(self, args, false);
++	return pyf_VM_copyFile(self, args, false);
+ } /* pyf_VM_copyFileFromGuestToHost */
+ 
+ static PyObject *pyf_VM_runProgramInGuest(VM *self, PyObject *args) {
+-  VixHandle jobH = VIX_INVALID_HANDLE;
+-  VixError err;
+-  PyObject *pyRes = NULL;
+-
+-  char *progPath;
+-  char *commandLine;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  if (!PyArg_ParseTuple(args, "ss", &progPath, &commandLine)) { goto fail; }
+-
+-  LEAVE_PYTHON
+-  jobH = VixVM_RunProgramInGuest(self->handle,
+-      progPath, commandLine,
+-      0, /* options */
+-      /* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
+-      VIX_INVALID_HANDLE,
+-      NULL, /* callbackProc */
+-      NULL  /* clientData */
+-    );
+-  err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  pyRes = Py_None;
+-  Py_INCREF(Py_None);
+-  goto cleanup;
+-  fail:
+-    assert (PyErr_Occurred());
+-    assert (pyRes == NULL);
+-    /* Fall through to cleanup: */
+-  cleanup:
+-    if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
+-    return pyRes;
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	VixCallbackAccumulator acc;	
++	PyObject *pyRes = NULL;
++
++	
++	char *progPath;
++	char *commandLine;
++	int options = 0;
++	
++	if (VixCallbackAccumulator_TupleInit(&acc, 3) != SUCCEEDED) { goto fail; }
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "ss|i", &progPath, &commandLine, &options)) { goto fail; }
++	
++	options &= VIX_RUNPROGRAM_ACTIVATE_WINDOW | VIX_RUNPROGRAM_RETURN_IMMEDIATELY;
++	
++	LEAVE_PYTHON
++	jobH = VixVM_RunProgramInGuest(self->handle,
++			progPath, commandLine,
++			options, /* options */
++			/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++			VIX_INVALID_HANDLE,
++			VixCallback_accumulateProcessStats, /* callbackProc */
++			&acc  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	
++	CHECK_VIX_ERROR(err);
++	pyRes = acc.target;
++	acc.target = NULL;
++	goto cleanup;
++	fail:
++	  assert (PyErr_Occurred());
++	  assert (pyRes == NULL);
++	  VixCallbackAccumulator_clear(&acc);
++	    /* Fall through to cleanup: */
++	cleanup:
++	  if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	  return pyRes;
+ } /* pyf_VM_runProgramInGuest */
+ 
++static PyObject *pyf_VM_openUrlInGuest(VM *self, PyObject *args) {
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++	char *url;
++	
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &url)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_OpenUrlInGuest(self->handle,
++			                      url,
++			                      0, // options,
++			                      VIX_INVALID_HANDLE, // propertyListHandle,
++			                      NULL, // callbackProc,
++			                      NULL); // clientData
++	
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_openUrlInGuest */
++
++static PyObject *pyf_VM_runScriptInGuest(VM *self, PyObject *args) {
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++	VixCallbackAccumulator acc;
++	char *scripttext, *interpreter;
++	int options = 0;
++	VM_REQUIRE_OPEN(self);
++	
++	if (VixCallbackAccumulator_TupleInit(&acc, 3) != SUCCEEDED) { goto fail; }
++	if (!PyArg_ParseTuple(args, "ss|i", &interpreter, &scripttext, &options)) { goto fail; }
++	
++	options &= VIX_RUNPROGRAM_ACTIVATE_WINDOW | VIX_RUNPROGRAM_RETURN_IMMEDIATELY;
++	
++	LEAVE_PYTHON
++	jobH = VixVM_RunScriptInGuest(self->handle,
++			                      interpreter,
++			                      scripttext,
++			                      options, // options,
++			                      VIX_INVALID_HANDLE, // propertyListHandle,
++			                  	  VixCallback_accumulateProcessStats, /* callbackProc */
++			                  	  &acc  /* clientData */
++								);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	
++	CHECK_VIX_ERROR(err);
++	pyRes = acc.target;
++	acc.target = NULL;
++	goto cleanup;
++	fail:
++	  assert (PyErr_Occurred());
++	  assert (pyRes == NULL);
++	  VixCallbackAccumulator_clear(&acc);
++	    /* Fall through to cleanup: */
++	cleanup:
++	  if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	  return pyRes;
++} /* pyf_VM_runScriptInGuest */
++
+ static PyObject *pyf_VM_host_get(VM *self, void *closure) {
+-  PyObject *host = (self->host != NULL ? (PyObject *) self->host : Py_None);
+-  Py_INCREF(host);
+-  return host;
++	PyObject *host = (self->host != NULL ? (PyObject *) self->host : Py_None);
++	Py_INCREF(host);
++	return host;
+ } /* pyf_VM_host_get */
+ 
+ static PyObject *pyf_VM_nRootSnapshots_get(VM *self, void *closure) {
+-  VixError err = VIX_OK;
+-  int nRootSnapshots;
++	VixError err = VIX_OK;
++	int nRootSnapshots;
+ 
+-  VM_REQUIRE_OPEN(self);
++	VM_REQUIRE_OPEN(self);
+ 
+-  LEAVE_PYTHON
+-  err = VixVM_GetNumRootSnapshots(self->handle, &nRootSnapshots);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  return PyInt_FromLong(nRootSnapshots);
+-  fail:
+-    assert (PyErr_Occurred());
+-    return NULL;
++	LEAVE_PYTHON
++	err = VixVM_GetNumRootSnapshots(self->handle, &nRootSnapshots);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	return PyInt_FromLong(nRootSnapshots);
++	fail:
++	assert (PyErr_Occurred());
++	return NULL;
+ } /* pyf_VM_nRootSnapshots_get */
+ 
+ static PyObject *pyf_VM_rootSnapshots_get(VM *self, void *closure) {
+-  VixError err = VIX_OK;
+-  int nRootSnapshots = -1;
+-  int i;
+-  PyObject *pySnapList = NULL;
+-
+-  VM_REQUIRE_OPEN(self);
+-
+-  LEAVE_PYTHON
+-  err = VixVM_GetNumRootSnapshots(self->handle, &nRootSnapshots);
+-  ENTER_PYTHON
+-  CHECK_VIX_ERROR(err);
+-
+-  assert (nRootSnapshots >= 0);
+-  pySnapList = PyList_New(nRootSnapshots);
+-  if (pySnapList == NULL) { goto fail; }
+-
+-  for (i = 0; i < nRootSnapshots; i++) {
+-    VixHandle snapH = VIX_INVALID_HANDLE;
+-    PyObject *pySnap = NULL;
+-
+-    LEAVE_PYTHON
+-    err = VixVM_GetRootSnapshot(self->handle, i, &snapH);
+-    ENTER_PYTHON
+-    CHECK_VIX_ERROR(err);
+-
+-    assert (snapH != VIX_INVALID_HANDLE);
+-    pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
+-        "Oi", self, snapH
+-      );
+-    /* If the creation of pySnap succeeded, the Snapshot instance now owns
+-     * snapH; if the creation failed, we need to release snapH: */
+-    if (pySnap == NULL) {
+-      Vix_ReleaseHandle(snapH);
+-      goto fail;
+-    }
+-
+-    /* PyList_SET_ITEM steals our reference to pySnap: */
+-    PyList_SET_ITEM(pySnapList, i, pySnap);
+-  }
+-
+-  assert (pySnapList != NULL);
+-  assert (PyList_GET_SIZE(pySnapList) == (Py_ssize_t) nRootSnapshots);
+-  return pySnapList;
+-  fail:
+-    assert (PyErr_Occurred());
+-    Py_XDECREF(pySnapList);
+-    return NULL;
++	VixError err = VIX_OK;
++	int nRootSnapshots = -1;
++	int i;
++	PyObject *pySnapList = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	LEAVE_PYTHON
++	err = VixVM_GetNumRootSnapshots(self->handle, &nRootSnapshots);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	assert (nRootSnapshots >= 0);
++	pySnapList = PyList_New(nRootSnapshots);
++	if (pySnapList == NULL) { goto fail; }
++
++	for (i = 0; i < nRootSnapshots; i++) {
++		VixHandle snapH = VIX_INVALID_HANDLE;
++		PyObject *pySnap = NULL;
++
++		LEAVE_PYTHON
++		err = VixVM_GetRootSnapshot(self->handle, i, &snapH);
++		ENTER_PYTHON
++		CHECK_VIX_ERROR(err);
++
++		assert (snapH != VIX_INVALID_HANDLE);
++		pySnap = PyObject_CallFunction((PyObject *) &SnapshotType,
++				"Oi", self, snapH
++		);
++		/* If the creation of pySnap succeeded, the Snapshot instance now owns
++		 * snapH; if the creation failed, we need to release snapH: */
++		if (pySnap == NULL) {
++			Vix_ReleaseHandle(snapH);
++			goto fail;
++		}
++
++		/* PyList_SET_ITEM steals our reference to pySnap: */
++		PyList_SET_ITEM(pySnapList, i, pySnap);
++	}
++
++	assert (pySnapList != NULL);
++	assert (PyList_GET_SIZE(pySnapList) == (Py_ssize_t) nRootSnapshots);
++	return pySnapList;
++	fail:
++	assert (PyErr_Occurred());
++	Py_XDECREF(pySnapList);
++	return NULL;
+ } /* pyf_VM_rootSnapshots_get */
++static PyObject *pyf_VM_createDirectoryInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *pathname;
++
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_CreateDirectoryInGuest(self->handle,
++			pathname,
++			/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++			VIX_INVALID_HANDLE,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_createDirectoryInGuest */
++
++
++static PyObject *pyf_VM_listDirectoryInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	VixCallbackAccumulator acc;	
++	PyObject *pyRes = NULL;
++	char *pathname = NULL;
++	
++	VM_REQUIRE_OPEN(self);
++	
++	if (VixCallbackAccumulator_ListInit(&acc) != SUCCEEDED) { goto fail; }
++
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_ListDirectoryInGuest(self->handle,
++			pathname,
++			0, /* options */
++			VixCallback_accumulateDirectoryList, &acc);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	
++	CHECK_VIX_ERROR(err);
++	pyRes = acc.target;
++	acc.target = NULL;
++	goto cleanup;
++	fail:
++	  assert (PyErr_Occurred());
++	  assert (pyRes == NULL);
++	  VixCallbackAccumulator_clear(&acc);
++	    /* Fall through to cleanup: */
++	cleanup:
++	  if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	  return pyRes;
++} /* pyf_VM_listDirectoryInGuest */
++
++static PyObject *pyf_VM_renameFileInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *oldname = NULL, 
++		 *newname = NULL;
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "ss", &oldname, &newname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_RenameFileInGuest(self->handle,
++			oldname,
++			newname,
++			0, /* options */
++			VIX_INVALID_HANDLE, /* property Handle */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_renameFileInGuest */
++
++
++static PyObject *pyf_VM_deleteDirectoryInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *pathname;
++
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_DeleteDirectoryInGuest(self->handle,
++			pathname,
++			/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++			VIX_INVALID_HANDLE,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_deleteDirectoryInGuest */
++static PyObject *pyf_VM_deleteFileInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *pathname;
++
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_DeleteFileInGuest(self->handle,
++			pathname,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_deleteFileInGuest */
++
++
++
++static PyObject *pyf_VM_directoryExistsInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *res = NULL;
++	long exists = 0;
++	char *pathname;
++
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_DirectoryExistsInGuest(self->handle,
++			pathname,
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_OBJECT_EXISTS,
++			&exists,
++			VIX_PROPERTY_NONE);
++
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++	res = PyBool_FromLong(exists);
++	//assert (PyBool_CheckExact(res));
++
++	if (res == NULL){goto fail;}
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (res == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return res;
++} /* pyf_VM_deleteFileInGuest */
++
++static PyObject *pyf_VM_getNumSharedFolders(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyResult = NULL;
++	int numSharedFolders;
++
++
++	VM_REQUIRE_OPEN(self);
++	LEAVE_PYTHON
++	jobH = VixVM_GetNumSharedFolders(self->handle, NULL, NULL);
++	err = VixJob_Wait(jobH,
++			VIX_PROPERTY_JOB_RESULT_SHARED_FOLDER_COUNT,
++			&numSharedFolders,
++			VIX_PROPERTY_NONE);
++
++	ENTER_PYTHON
++
++	CHECK_VIX_ERROR(err);
++	pyResult = PyInt_FromLong(numSharedFolders);
++	assert(PyInt_CheckExact(pyResult));
++
++	if (pyResult == NULL) {
++		goto fail;
++	}
++
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyResult == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyResult;
++} /* pyf_VM_getNumSharedFolders */
++
++static PyObject *pyf_VM_getSharedFolderState(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	VixCallbackAccumulator acc;
++	PyObject *pyResult = NULL;
++	
++	unsigned int i = 0;
++	
++	VM_REQUIRE_OPEN(self);
++		
++	if (VixCallbackAccumulator_TupleInit(&acc, 3) != SUCCEEDED) { goto fail; }
++	
++	if (!PyArg_ParseTuple(args, "i", &i)) { goto fail; }
++	VM_REQUIRE_OPEN(self);
++	
++	LEAVE_PYTHON
++	jobH = VixVM_GetSharedFolderState(self->handle, i, VixCallback_accumulateSharedStateList, &acc);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	
++	CHECK_VIX_ERROR(err);
++	pyResult = acc.target;
++	acc.target = NULL;
++	goto cleanup;
++	fail:
++	  assert (PyErr_Occurred());
++	  assert (pyResult == NULL);
++	  VixCallbackAccumulator_clear(&acc);
++	  /* Fall through to cleanup: */
++	cleanup:
++	  if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	  return pyResult;
++} /* pyf_VM_getSharedFolderState */
++static PyObject *pyf_VM_setSharedFolderState(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyResult = NULL;
++
++	char *folderName = NULL,
++	*folderHostPath = NULL;
++	int folderFlags = 0;
++
++	if (!PyArg_ParseTuple(args, "ssi", &folderName, &folderHostPath, &folderFlags)) { goto fail; }
++	VM_REQUIRE_OPEN(self);
++	LEAVE_PYTHON
++	jobH = VixVM_SetSharedFolderState(self->handle, folderName, folderHostPath,
++	                                          folderFlags,
++	                                          NULL, NULL);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++
++	CHECK_VIX_ERROR(err);
++
++	pyResult = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyResult == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyResult;
++} /* pyf_VM_setSharedFolderState */
++
++static PyObject *pyf_VM_addSharedFolder(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	char *pathname;
++	char *sharename;
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "ss", &sharename, &pathname)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_AddSharedFolder(self->handle,
++			sharename,
++			pathname,
++			VIX_SHAREDFOLDER_WRITE_ACCESS, /* options:  Must be 0 in current release. */
++			/* propertyList:  Must be VIX_INVALID_HANDLE in current release: */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_addSharedFolder */
++
++static PyObject *pyf_VM_enableorDisableSharedFolders(VM *self, PyObject *args, bool enableSF)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *pyRes = NULL;
++	VM_REQUIRE_OPEN(self);
++	LEAVE_PYTHON
++	if (enableSF)  /* enable shared Folders */
++		jobH = VixVM_EnableSharedFolders(self->handle,
++				enableSF, /* bool Enabled shared Folders */
++				0, /* options:  Must be 0 in current release. */
++				NULL, 
++				NULL
++		);
++	else /* disable shared folders */
++		jobH = VixVM_EnableSharedFolders(self->handle,
++				enableSF, /* bool Enabled shared Folders */
++				0, /* options:  Must be 0 in current release. */
++				NULL, 
++				NULL
++		);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	 
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	
++	if (pyRes == NULL){goto fail;}
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_enableorDisableSharedFolders */
++static PyObject *pyf_VM_enableSharedFolders(VM *self, PyObject *args){
++	return pyf_VM_enableorDisableSharedFolders(self, args, TRUE);
++} /* pyf_VM_enableSharedFolders */
++static PyObject *pyf_VM_disableSharedFolders(VM *self, PyObject *args){
++	return pyf_VM_enableorDisableSharedFolders(self, args, FALSE);
++} /* pyf_VM_disableSharedFolders */
++
++static PyObject *pyf_VM_createTempFileInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *res = NULL;
++	char *temppath = NULL;
++
++
++	VM_REQUIRE_OPEN(self);
+ 
++
++
++	LEAVE_PYTHON
++	jobH = VixVM_CreateTempFileInGuest(self->handle,
++			0, /* options:  Must be 0 in current release. */
++			VIX_INVALID_HANDLE,
++			NULL, 
++			NULL
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_OBJECT_EXISTS,
++			&temppath,
++			VIX_PROPERTY_NONE);
++
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	if (temppath == NULL){ goto fail;}
++	res =  PyString_FromString(temppath); 
++	assert (PyString_CheckExact(res));
++
++	if (res == NULL){goto fail;}
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (res == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return res;
++} /* pyf_VM_createTempFileInGuest */
++
++static PyObject *pyf_VM_fileExistsInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err = VIX_OK;
++	PyObject *res = NULL;
++	char *pathname = NULL;
++	long exists;
++
++	VM_REQUIRE_OPEN(self);
++	if (!PyArg_ParseTuple(args, "s", &pathname)) { goto fail; }
++
++
++	LEAVE_PYTHON
++	jobH = VixVM_FileExistsInGuest(self->handle,
++			pathname, 
++			NULL, 
++			NULL
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_JOB_RESULT_GUEST_OBJECT_EXISTS,
++			&exists,
++			VIX_PROPERTY_NONE);
++
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++	res = PyBool_FromLong(exists);
++	//assert (PyBool_CheckExact(res));
++
++	if (res == NULL){goto fail;}
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (res == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return res;
++} /* pyf_VM_fileExistsInGuest */
++
++
++static PyObject *pyf_VM_listProcessesInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	VixCallbackAccumulator acc;	
++	PyObject *pyRes = NULL;
++
++	VM_REQUIRE_OPEN(self);
++	if (VixCallbackAccumulator_ListInit(&acc) != SUCCEEDED) { goto fail; }
++	
++	LEAVE_PYTHON
++	jobH = VixVM_ListProcessesInGuest(self->handle, 0, VixCallback_accumulateProcessList, &acc);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	
++	CHECK_VIX_ERROR(err);
++	pyRes = acc.target;
++	acc.target = NULL;
++	goto cleanup;
++	fail:
++	  assert (PyErr_Occurred());
++	  assert (pyRes == NULL);
++	  VixCallbackAccumulator_clear(&acc);
++	    /* Fall through to cleanup: */
++	cleanup:
++	  if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	  return pyRes;
++} /* pyf_VM_listProcessesInGuest */
++
++
++static PyObject *pyf_VM_killProcessInGuest(VM *self, PyObject *args)
++{
++	VixHandle jobH = VIX_INVALID_HANDLE;
++	VixError err;
++	PyObject *pyRes = NULL;
++
++	uint64 pid;
++
++
++	VM_REQUIRE_OPEN(self);
++
++	if (!PyArg_ParseTuple(args, "i", &pid)) { goto fail; }
++
++	LEAVE_PYTHON
++	jobH = VixVM_KillProcessInGuest(self->handle,
++			pid,
++			0, /* options:  Must be 0 in current release. */
++			NULL, /* callbackProc */
++			NULL  /* clientData */
++	);
++	err = VixJob_Wait(jobH, VIX_PROPERTY_NONE);
++	ENTER_PYTHON
++	CHECK_VIX_ERROR(err);
++
++	pyRes = Py_None;
++	Py_INCREF(Py_None);
++	goto cleanup;
++	fail:
++	assert (PyErr_Occurred());
++	assert (pyRes == NULL);
++	/* Fall through to cleanup: */
++	cleanup:
++	if (jobH != VIX_INVALID_HANDLE) { Vix_ReleaseHandle(jobH); }
++	return pyRes;
++} /* pyf_VM_killProcessInGuest */
+ static PyMethodDef VM_methods[] = {
+-    {"close",
+-        (PyCFunction) pyf_VM_close,
+-        METH_NOARGS
+-      },
+-    {"powerOn",
+-        (PyCFunction) pyf_VM_powerOn,
+-        METH_NOARGS
+-      },
+-    {"powerOff",
+-        (PyCFunction) pyf_VM_powerOff,
+-        METH_NOARGS
+-      },
+-    {"reset",
+-        (PyCFunction) pyf_VM_reset,
+-        METH_NOARGS
+-      },
+-    {"suspend",
+-        (PyCFunction) pyf_VM_suspend,
+-        METH_NOARGS
+-      },
+-    {"installTools",
+-        (PyCFunction) pyf_VM_installTools,
+-        METH_NOARGS
+-      },
+-    {"waitForToolsInGuest",
+-        (PyCFunction) pyf_VM_waitForToolsInGuest,
+-        METH_VARARGS
+-      },
+-    {"upgradeVirtualHardware",
+-        (PyCFunction) pyf_VM_upgradeVirtualHardware,
+-        METH_NOARGS
+-      },
+-    {"delete",
+-        (PyCFunction) pyf_VM_delete,
+-        METH_NOARGS
+-      },
+-    {"createSnapshot",
+-        /* It should actually be PyCFunctionWithKeywords, but GCC grumbles
+-         * about that: */
+-        (PyCFunction) pyf_VM_createSnapshot,
+-        METH_VARARGS | METH_KEYWORDS,
+-      },
+-    {"removeSnapshot",
+-        (PyCFunction) pyf_VM_removeSnapshot,
+-        METH_VARARGS
+-      },
+-    {"revertToSnapshot",
+-        (PyCFunction) pyf_VM_revertToSnapshot,
+-        METH_VARARGS
+-      },
+-    {"loginInGuest",
+-        /* It should actually be PyCFunctionWithKeywords, but GCC grumbles
+-         * about that: */
+-        (PyCFunction) pyf_VM_loginInGuest,
+-        METH_VARARGS | METH_KEYWORDS,
+-      },
+-    {"copyFileFromHostToGuest",
+-        (PyCFunction) pyf_VM_copyFileFromHostToGuest,
+-        METH_VARARGS
+-      },
+-    {"copyFileFromGuestToHost",
+-        (PyCFunction) pyf_VM_copyFileFromGuestToHost,
+-        METH_VARARGS
+-      },
+-    {"runProgramInGuest",
+-        (PyCFunction) pyf_VM_runProgramInGuest,
+-        METH_VARARGS
+-      },
+-    {NULL}  /* sentinel */
+-  };
++		{"close",
++				(PyCFunction) pyf_VM_close,
++				METH_NOARGS
++		},
++		{"powerOn",
++				(PyCFunction) pyf_VM_powerOn,
++				METH_NOARGS
++		},
++		{"powerOff",
++				(PyCFunction) pyf_VM_powerOff,
++				METH_NOARGS
++		},
++		{"reset",
++				(PyCFunction) pyf_VM_reset,
++				METH_NOARGS
++		},
++		{"suspend",
++				(PyCFunction) pyf_VM_suspend,
++				METH_NOARGS
++		},
++		{"installTools",
++				(PyCFunction) pyf_VM_installTools,
++				METH_NOARGS
++		},
++		{"waitForToolsInGuest",
++				(PyCFunction) pyf_VM_waitForToolsInGuest,
++				METH_VARARGS
++		},
++		{"upgradeVirtualHardware",
++				(PyCFunction) pyf_VM_upgradeVirtualHardware,
++				METH_NOARGS
++		},
++		{"delete",
++				(PyCFunction) pyf_VM_delete,
++				METH_NOARGS
++		},
++		{"createSnapshot",
++				/* It should actually be PyCFunctionWithKeywords, but GCC grumbles
++				 * about that: */
++				(PyCFunction) pyf_VM_createSnapshot,
++				METH_VARARGS | METH_KEYWORDS,
++		},
++		{"getCurrentSnapshot",
++				/* It should actually be PyCFunctionWithKeywords, but GCC grumbles
++				 * about that: */
++				(PyCFunction) pyf_VM_getCurrentSnapshot,
++				METH_VARARGS | METH_KEYWORDS,
++		},
++		{"getNamedSnapshot",
++				/* It should actually be PyCFunctionWithKeywords, but GCC grumbles
++				 * about that: */
++				(PyCFunction) pyf_VM_getNamedSnapshot,
++				METH_VARARGS | METH_KEYWORDS,
++		},
++		{"removeSnapshot",
++				(PyCFunction) pyf_VM_removeSnapshot,
++				METH_VARARGS
++		},
++		{"revertToSnapshot",
++				(PyCFunction) pyf_VM_revertToSnapshot,
++				METH_VARARGS
++		},
++		{"loginInGuest",
++				/* It should actually be PyCFunctionWithKeywords, but GCC grumbles
++				 * about that: */
++				(PyCFunction) pyf_VM_loginInGuest,
++				METH_VARARGS | METH_KEYWORDS,
++		},
++		{"logoutFromGuest",
++				/* It should actually be PyCFunctionWithKeywords, but GCC grumbles
++				 * about that: */
++				(PyCFunction) pyf_VM_logoutFromGuest,
++				METH_VARARGS | METH_KEYWORDS,
++		},
++
++		{"copyFileFromHostToGuest",
++				(PyCFunction) pyf_VM_copyFileFromHostToGuest,
++				METH_VARARGS
++		},
++		{"copyFileFromGuestToHost",
++				(PyCFunction) pyf_VM_copyFileFromGuestToHost,
++				METH_VARARGS
++		},
++		{"runProgramInGuest",
++				(PyCFunction) pyf_VM_runProgramInGuest,
++				METH_VARARGS
++		},
++		{"runScriptInGuest",
++				(PyCFunction) pyf_VM_runScriptInGuest,
++				METH_VARARGS
++		},
++		{"openUrlInGuest",
++				(PyCFunction) pyf_VM_openUrlInGuest,
++				METH_VARARGS
++		},
++		{"createDirectoryInGuest",
++				(PyCFunction) pyf_VM_createDirectoryInGuest,
++				METH_VARARGS
++		},
++		{"renameFileInGuest",
++				(PyCFunction) pyf_VM_renameFileInGuest,
++				METH_VARARGS
++		},
++		{"listDirectoryInGuest",
++				(PyCFunction) pyf_VM_listDirectoryInGuest,
++				METH_VARARGS
++		},
++		{"directoryExistsInGuest",
++				(PyCFunction) pyf_VM_directoryExistsInGuest,
++				METH_VARARGS
++		},
++		{"deleteDirectoryInGuest",
++				(PyCFunction) pyf_VM_deleteDirectoryInGuest,
++				METH_VARARGS
++		},
++		{"deleteFileInGuest",
++				(PyCFunction) pyf_VM_deleteFileInGuest,
++				METH_VARARGS
++		},
++		{"createTempFileInGuest",
++				(PyCFunction) pyf_VM_createTempFileInGuest,
++				METH_VARARGS
++		},
++		{"fileExistsInGuest",
++				(PyCFunction) pyf_VM_fileExistsInGuest,
++				METH_VARARGS
++		},
++		{"addSharedFolder",
++				(PyCFunction) pyf_VM_addSharedFolder,
++				METH_VARARGS
++		},
++		{"enableSharedFolders",
++				(PyCFunction) pyf_VM_enableSharedFolders,
++				METH_VARARGS
++		},
++		{"disableSharedFolders",
++				(PyCFunction) pyf_VM_disableSharedFolders,
++				METH_VARARGS
++		},
++		{"getNumSharedFolders",
++				(PyCFunction) pyf_VM_getNumSharedFolders,
++				METH_VARARGS
++		},
++		{"getSharedFolderState",
++				(PyCFunction) pyf_VM_getSharedFolderState,
++				METH_VARARGS
++		},
++		{"setSharedFolderState",
++				(PyCFunction) pyf_VM_setSharedFolderState,
++				METH_VARARGS
++		},
++		{"listProcessesInGuest",
++				(PyCFunction) pyf_VM_listProcessesInGuest,
++				METH_VARARGS
++		},
++		{"killProcessInGuest",
++				(PyCFunction) pyf_VM_killProcessInGuest,
++				METH_VARARGS
++		},
++		{NULL}  /* sentinel */
++};
+ 
+ static PyGetSetDef VM_getters_setters[] = {
+-    {"closed",
+-        (getter) pyf_VM_closed_get,
+-        NULL,
+-        "True if the VM is *known* to be closed."
+-      },
+-    {"host",
+-        (getter) pyf_VM_host_get,
+-        NULL,
+-        "The Host on which this VM resides."
+-      },
+-    {"nRootSnapshots",
+-        (getter) pyf_VM_nRootSnapshots_get,
+-        NULL,
+-        "The number of root snapshots in this VM (the length of the list"
+-        " returned by the rootSnapshots property)."
+-      },
+-    {"rootSnapshots",
+-        (getter) pyf_VM_rootSnapshots_get,
+-        NULL,
+-        "A list of Snapshot objects that represent the root snapshots in this"
+-        " VM."
+-      },
+-    {NULL}  /* sentinel */
+-  };
++		{"closed",
++				(getter) pyf_VM_closed_get,
++				NULL,
++				"True if the VM is *known* to be closed."
++		},
++		{"host",
++				(getter) pyf_VM_host_get,
++				NULL,
++				"The Host on which this VM resides."
++		},
++		{"nRootSnapshots",
++				(getter) pyf_VM_nRootSnapshots_get,
++				NULL,
++				"The number of root snapshots in this VM (the length of the list"
++				" returned by the rootSnapshots property)."
++		},
++		{"rootSnapshots",
++				(getter) pyf_VM_rootSnapshots_get,
++				NULL,
++				"A list of Snapshot objects that represent the root snapshots in this"
++				" VM."
++		},
++		{NULL}  /* sentinel */
++};
+ 
+ PyTypeObject VMType = { /* new-style class */
+-    PyObject_HEAD_INIT(NULL)
+-    0,                                  /* ob_size */
+-    "pyvix.vix.VM",                     /* tp_name */
+-    sizeof(VM),                         /* tp_basicsize */
+-    0,                                  /* tp_itemsize */
+-    (destructor) pyf_VM___del__,        /* tp_dealloc */
+-    0,                                  /* tp_print */
+-    0,                                  /* tp_getattr */
+-    0,                                  /* tp_setattr */
+-    0,                                  /* tp_compare */
+-    0,                                  /* tp_repr */
+-    0,                                  /* tp_as_number */
+-    0,                                  /* tp_as_sequence */
+-    &StatefulHandleWrapper_as_mapping,  /* tp_as_mapping */
+-    0,                                  /* tp_hash */
+-    0,                                  /* tp_call */
+-    0,                                  /* tp_str */
+-    0,                                  /* tp_getattro */
+-    0,                                  /* tp_setattro */
+-    0,                                  /* tp_as_buffer */
+-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+-                                        /* tp_flags */
+-    0,                                  /* tp_doc */
+-    0,		                              /* tp_traverse */
+-    0,		                              /* tp_clear */
+-    0,		                              /* tp_richcompare */
+-    0,		                              /* tp_weaklistoffset */
+-
+-    0,                    		          /* tp_iter */
+-    0,		                              /* tp_iternext */
+-
+-    VM_methods,                         /* tp_methods */
+-    NULL,                               /* tp_members */
+-    VM_getters_setters,                 /* tp_getset */
+-    0,                                  /* tp_base */
+-    0,                                  /* tp_dict */
+-    0,                                  /* tp_descr_get */
+-    0,                                  /* tp_descr_set */
+-    0,                                  /* tp_dictoffset */
+-
+-    (initproc) VM_init,                 /* tp_init */
+-    0,                                  /* tp_alloc */
+-    pyf_VM_new,                         /* tp_new */
+-    0,                                  /* tp_free */
+-    0,                                  /* tp_is_gc */
+-    0,                                  /* tp_bases */
+-    0,                                  /* tp_mro */
+-    0,                                  /* tp_cache */
+-    0,                                  /* tp_subclasses */
+-    0                                   /* tp_weaklist */
+-  };
++		PyObject_HEAD_INIT(NULL)
++		0,                                  /* ob_size */
++		"pyvix.vix.VM",                     /* tp_name */
++		sizeof(VM),                         /* tp_basicsize */
++		0,                                  /* tp_itemsize */
++		(destructor) pyf_VM___del__,        /* tp_dealloc */
++		0,                                  /* tp_print */
++		0,                                  /* tp_getattr */
++		0,                                  /* tp_setattr */
++		0,                                  /* tp_compare */
++		0,                                  /* tp_repr */
++		0,                                  /* tp_as_number */
++		0,                                  /* tp_as_sequence */
++		&StatefulHandleWrapper_as_mapping,  /* tp_as_mapping */
++		0,                                  /* tp_hash */
++		0,                                  /* tp_call */
++		0,                                  /* tp_str */
++		0,                                  /* tp_getattro */
++		0,                                  /* tp_setattro */
++		0,                                  /* tp_as_buffer */
++		Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
++		/* tp_flags */
++		0,                                  /* tp_doc */
++		0,		                              /* tp_traverse */
++		0,		                              /* tp_clear */
++		0,		                              /* tp_richcompare */
++		0,		                              /* tp_weaklistoffset */
++
++		0,                    		          /* tp_iter */
++		0,		                              /* tp_iternext */
++
++		VM_methods,                         /* tp_methods */
++		NULL,                               /* tp_members */
++		VM_getters_setters,                 /* tp_getset */
++		0,                                  /* tp_base */
++		0,                                  /* tp_dict */
++		0,                                  /* tp_descr_get */
++		0,                                  /* tp_descr_set */
++		0,                                  /* tp_dictoffset */
++
++		(initproc) VM_init,                 /* tp_init */
++		0,                                  /* tp_alloc */
++		pyf_VM_new,                         /* tp_new */
++		0,                                  /* tp_free */
++		0,                                  /* tp_is_gc */
++		0,                                  /* tp_bases */
++		0,                                  /* tp_mro */
++		0,                                  /* tp_cache */
++		0,                                  /* tp_subclasses */
++		0                                   /* tp_weaklist */
++};
+ 
+ /* VMTracker support defs: */
+ LIFO_LINKED_LIST_DEFINE_BASIC_METHODS_PYALLOC_NOQUAL(VMTracker, VM)

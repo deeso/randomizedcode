@@ -1,0 +1,96 @@
+This file was put together pretty hastily, but let me know if you have questions.
+
+Contents:
+
+About and Background
+Example Usage
+Valid Data for Output
+Specifying output fields
+Limitations
+
+About and Background===========================================================
+
+This script is meant for parsing data saved in XML format from the TamperData
+Plugin for Fire Fox.  If you are unfamiliar with this plugin, it allows the 
+user to tamper with HTTP headers for requests.  This plug-in is available 
+through add-ons in Fire Fox (e.g. Tools->Add-ons then Get Extensions).
+
+This script was developed for use in the discovery phase for web applications, and 
+it is useful for extracting particular HTTP header elements and data output.  The 
+output from the script can then be imported to Excel or some other application for 
+further analysis.  
+  
+
+Example Usage==================================================================
+
+All the DLL, .pyd, and exe files required if you use the TDParser.exe.
+
+Python Script way:
+python TDParser.py -f <input_file.xml> -d <tab delimiter> -l <list of fields> -o <out put files>
+python TDParser.py -f td_data.xml -d , -l StartTime,uri,Cookie -o output.csv
+
+Executable way:
+TDParser.py -f <input_file.xml> -d <tab delimiter> -l <list of fields> -o <out put files>
+
+-f --> input file and only required parameter
+-d --> delimiter such as " " or "," default is a tab NOTE: depending on the output use 
+		either tabs or multi-character delimiters
+-o --> specifies the output file
+-l --> comma delimited list of HTTP Header and post parameters
+		e.g. -l StartTime,uri,Cookie will output the StartTime of the 
+		Request, the url of the request, and the Cookie(s) sent in the 
+		HTTP request
+
+For people who program in Python and want to interact with the data, they can 
+use the included Python script to parse and interact with the data.  The following 
+example details how to read in data and set each request element.  After reading 
+in the data, it then counts the unique uris and files then prints the results of 
+the unique uris and files out using the TDRequests container class.
+
+There are two primary classes.  TDParser parses TamperData HTTP Requests and the 
+associated Responses.  TDRequests is a container class for each of the TDRequest
+element.
+
+Example:
+
+from xml.dom import minidom                                          
+import urllib
+
+requests = TDRequests()
+# initializes the XML DOM
+xmldoc = minidom.parse("text_data.xml")
+node = xmldoc.firstChild
+# Parse the DOM given the starting node
+while not node is None:
+	if node.nodeName == "tdRequests":
+		for i in node.childNodes:
+			if i.nodeName == "tdRequest":
+				c = TDRequest(i)
+				requests.append(c)
+	node = node.nextSibling
+u_uris = requests.get_unique_uris()
+u_files = requests.get_unique_files()
+print "There are %u unique uris and %u unique uri file names."%(len(u_uris), len(u_files))
+for i in u_uris:
+	print i 
+for i in u_files:
+	print i 
+
+Valid Data for Output==========================================================
+To access the base uri, parameters passed by url, file names in the uri etc., use the following:
+"uri" - url
+"base_uri" - url without the file or parameters at the end
+"uri_file" - file accessed by the url
+"uri_parameters" - parameters in the url string
+Any HTTP Header elements are valid
+To access the post parameters, you may need to look at the Tamper Data fields directly.  I am 
+too lazy (which is why I wrote the script)to make an exhaustive list.
+
+	
+Limitations====================================================================
+
+The TamperData plug-in does not capture data in the HTTP body, so this information
+is not available as output or manipulatable.  Furthermore, the TamperData plug-in 
+currently does not capture data that goes through the IE Tab plug-in, which simulates 
+Internet Explorer in a Fire Fox.  
+

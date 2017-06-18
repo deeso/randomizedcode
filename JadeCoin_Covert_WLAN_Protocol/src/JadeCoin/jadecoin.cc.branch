@@ -1,0 +1,757 @@
+/**
+ *        Filename:  jadecoin.cc
+ *         Version:  1.0
+ *          Author:  A. Pridgen, atpridgen@mail.utexas.edu
+ */
+
+#include "mac-802_11.h"
+#include "jadecoin.h"
+#include <stdlib.h>
+#define ADAM_DBG
+
+int hdr_jadecoin::offset_; 
+bool hdr_jadecoin::sent_; 
+
+
+void JadeCoinTimer::handle(Event *)
+{
+	jc_->sendCovertMsg();
+	#ifdef ADAM_DBG
+	printf("Start Sending (handle):Starting to send the Covert Message...\n");
+	#endif
+}
+void JadeCoinTimer::expire(Event *)
+{
+	//jc_->timeout();
+	#ifdef ADAM_DBG
+	printf("Expire: A send Expired and timedout...\n");
+	#endif
+
+}
+void JCJamTimer::handle(Event *)
+{
+	jc_->sending();
+	#ifdef ADAM_DBG
+//	printf("JCJamTimer:..\n");
+	#endif
+}
+void JCJamTimer::expire(Event *)
+{
+	//jc_->timeout();
+	#ifdef ADAM_DBG
+	printf("Expire: A send Expired and timedouts...\n");
+	#endif
+
+}
+void JCSendTimer::handle(Event *)
+{
+	jc_->myMac->sendJAM((jc_->myPackets[JType]));
+	printf("sending Jam");	
+	#ifdef ADAM_DBG
+//	printf("JCJamTimer:..\n");
+	#endif
+}
+void JCSendTimer::expire(Event *)
+{
+	//jc_->timeout();
+	#ifdef ADAM_DBG
+	printf("Expire: A send Expired and timedout...\n");
+	#endif
+
+}
+void JadeCoinAgent::timeout(void)
+{
+	if (numTimeouts < MAX_TIMEOUTS)
+	{
+		numTimeouts++;
+		jc_timer_.resched(calcTimeout());
+		#ifdef ADAM_DBG
+		printf("timeout: A time occurred %d and another scheduled in %f...\n", numTimeouts, timeout_);
+		#endif
+		
+	}else{
+		/*print error*/
+		#ifdef ADAM_DBG
+		printf("timeout: Too many timeouts!...\n");
+		#endif
+		stop();
+	}		
+		
+}	
+
+int JadeCoinAgent::updateNumberHosts()
+{
+	numNodes = (int) (myMac->getNodeCount());
+	return numNodes;
+}
+int JadeCoinAgent::updateBandwidth()
+{
+	bandwidth = (int) (myMac->getBandwidthUsage());
+	return bandwidth;
+}
+static class JadeCoinHeaderClass : public PacketHeaderClass 
+{
+	public:	
+ 	JadeCoinHeaderClass() : PacketHeaderClass("PacketHeader/JadeCoin",
+ 							sizeof(hdr_jadecoin))
+ 	{
+	#ifdef ADAM_DBG
+	printf("Something Happening in JCHClass...\n");
+	#endif
+ 		
+		bind_offset(&hdr_jadecoin::offset_);
+ 	}
+
+ //void export_offsets() {
+ //	field_offset("sendCode_", OFFSET(hdr_jadecoin, sendCode_));
+ //	field_offset("msgNum_", OFFSET(hdr_jadecoin, msgNum_));
+ //	field_offset("timeout_", OFFSET(hdr_jadecoin, timeout_));
+ //}
+} class_jadecoinhdr;
+
+static class JadeCoinClass : public TclClass {
+public:
+  JadeCoinClass() : TclClass("Agent/JadeCoin") {}
+  TclObject* create(int, const char*const*) 
+	{
+	#ifdef ADAM_DBG
+	printf("TclClass...\n");
+	#endif
+    
+		
+		return (new JadeCoinAgent());
+  }
+} class_jadecoin;
+
+JadeCoinAgent::JadeCoinAgent() : Agent(PT_JADECOIN), jam_timer_(this), jc_timer_(this), jcSendTimer(this)
+{
+ 		/* Set Agent Default Values */
+		type_ = PT_JADECOIN;	
+		symbolSize = 8;
+		numTimeouts = codeBuff = numNodes = 0;
+		timeout_ = msgNum = msgSize =  bandwidth = 0;
+		senderStopped = listener = true;
+		readFromMsg = false;
+		readFromFile = false;
+		startToListen = false;
+		myMac = NULL;
+		outFileName.assign("default.jc");
+		
+		/* Declare a Resident Jam Packet */
+		myPackets[JAM_] = allocpkt();
+		InitPackets(JAM_, myPackets[JAM_]);
+
+		/* Declare a Resident No-Jam Packet */
+		myPackets[NO_JAM_] = allocpkt();
+		InitPackets(NO_JAM_, myPackets[NO_JAM_]);
+}
+
+
+void JadeCoinAgent::InitPackets(int JType, Packet *p)
+{
+	char jamData[700];
+	/** 
+	 * Header Offsets for acccessing 
+	 * parts of the packet
+	 */ 
+	hdr_jadecoin  *jc = HDR_JADECOIN(p);
+	hdr_mac802_11 *dh = HDR_MAC802_11(p);
+	hdr_cmn 		  *ch = HDR_CMN(p);
+	
+	/* Set a connection between sent and send flag */
+	sendNextJam = &(jc->sent());
+	*sendNextJam = true;
+
+	/* Initialize the the Packets based on Type */
+	if (JType == JAM_)
+	{
+		for (int i = 0; i < JAM_PAYLOAD_SIZE_; i++)
+				jamData[i] = 0xff;
+		bcopy(jamData,jc->data(),700);
+		jc->sendCode() = MAC_JAM_SENTINEL;
+		dh->dh_fc.fc_subtype    = MAC_Subtype_JAM;
+	}
+	else
+	{
+		jc->sendCode() = MAC_NO_JAM_SENTINEL;
+		dh->dh_fc.fc_subtype 		= MAC_Subtype_NO_JAM;
+	}
+	/* Set some of the default values for 802.11 */	
+	dh->dh_fc.fc_protocol_version = MAC_ProtocolVersion;
+	dh->dh_fc.fc_type = MAC_Type_JAM;
+	for(int i=0; i<2; i++)
+	{
+		dh->dh_ra[i] =	0x31;
+		dh->dh_ra[i+1] =  0x33;
+		dh->dh_ra[i+2] =  0x73;
+	}	
+	for(int i=0; i<2; i++)
+	{
+		dh->dh_ta[i] =	0x31;
+		dh->dh_ta[i+1] =  0x33;
+		dh->dh_ta[i+2] =  0x73;
+	}	
+	for(int i=0; i<2; i++)
+	{
+		dh->dh_3a[i] =	0x31;
+		dh->dh_3a[i+1] =  0x33;
+		dh->dh_3a[i+2] =  0x73;
+	}	
+		
+	dh->dh_fc.fc_to_ds      = 0;
+	dh->dh_fc.fc_from_ds    = 0;
+	dh->dh_fc.fc_more_frag  = 0;
+	dh->dh_fc.fc_retry      = 0;
+	dh->dh_fc.fc_pwr_mgt    = 0;
+	dh->dh_fc.fc_more_data  = 0;
+	dh->dh_fc.fc_wep        = 0;
+	dh->dh_fc.fc_order      = 0;
+}
+
+
+void JadeCoinAgent::recv(int JType)
+{
+	static bool runOnce = true;
+  /**
+	 * We dont want the sender to 
+	 * listen, just send
+	 */
+	if (!listener)
+		return;	
+	/**
+	 * The sender has stopped and we
+	 * received some out of band 
+	 * notification, Now we will decode
+	 * our message and write it to file
+	 */
+	else if (senderStopped && runOnce)
+	{
+	 	// This call with the value 
+		// does not affect the msg  
+		// recordBits also has knowledge
+		// of sender status, not realistic
+		// but suitable for this run
+		recordBits(0);
+		runOnce = false;
+	}else	if(senderStopped)
+		return;
+	else if (JType == JAM_)
+		recordBits(COLLISION);
+	else
+		recordBits(NO_COLLISION);
+}
+void JadeCoinAgent::recordBits(int bit)
+{
+	
+	static volatile int currentBit = 1;
+	static volatile long currentByte = 0;
+	static volatile char inByte = 0;
+	
+	/* Open our swapfile */ 
+	swap.open("swapfile", std::ios::in | std::ios::out);
+	if (!swap.is_open())
+	{
+		puts("Failed to Open swapfile, does it exist in pwd?");
+		abort();
+	}
+	swap.seekg(0, std::ios::end);
+	
+	/**
+	 * If sender has stopped sending we want to 
+	 * to finish inputing our byte and then write
+	 * it to our outfile.  To write to the file
+	 * we read in the contents of the swapfile 
+	 * into a buffer, then write that contents 
+	 * to the outfile.
+	 */
+	if (senderStopped)
+	{
+	  /** 
+		 * Write out the last bits we
+		 * introduce some error here 
+		 * because we are only writing 
+		 * out in Bytes for ease of the 
+		 * implementation
+		 */	
+		if (currentBit > 0)
+		{
+			currentByte++;
+			swap.seekg(0, std::ios::end);
+			swap.put(inByte);
+			swap.flush();
+			swap.seekg(0);
+		}
+		/* Standard Allocation read and copy */
+		long size = currentByte/RATE + currentByte%RATE;
+		buffer_ = (char *)malloc(size);
+		output_ = (char *)malloc(currentByte);
+		swap.read(output_, currentByte);
+		swap.close();
+		/* decode with the repition decoder */
+		repititionDecoder(output_, currentByte, buffer_);
+		/* write everything to file */
+		JammingOutputFile.open(outFileName.c_str(),std::ios::binary);
+		JammingOutputFile.write(buffer_,size);
+		JammingOutputFile.flush();
+		/* close file and deallocate memory */
+		JammingOutputFile.close();
+		free(buffer_);
+		free(output_);
+		//delete []buffer_;
+		//delete []output_;
+	}
+  
+	/** 
+	 * Receiving Bits from Jamming and 
+	 * writing them to file one byte at 
+	 * a time
+	 */
+	inByte+=bit;
+	if(!((++currentBit)%8))
+	{
+		currentByte++;
+		currentBit = 1;
+		swap.put(inByte);
+		swap.flush();
+		swap.close();
+		inByte = 0;
+	}else
+		inByte <<= 1;
+}
+
+
+
+int JadeCoinAgent::command(int argc, const char*const* argv)
+{
+ 	Tcl& tcl = Tcl::instance();	
+		if (argc == 3)
+		{
+			if (strcmp(argv[1], "add_mac") == 0)
+			{
+			 	myMac = (Mac802_11*) TclObject::lookup(argv[2]);
+				numNodes = myMac->getNodeCount();
+				bandwidth = myMac->getBandwidthUsage();
+				myMac->setJCAgent(this);
+
+				#ifdef ADAM_DBG
+				printf("command: Linking myMac with the MAC Layer...\n");
+				#endif
+				return TCL_OK;
+			}else if (strcmp(argv[1], "isJadeCoinNode") == 0) {
+				bool ret = myMac->setJCNode((bool) atoi(argv[2]));
+				myMac->setJCLNode(ret);
+				#ifdef ADAM_DBG
+				printf("MacCommand: isJadeCoinNode is %ld...\n", (int)ret);
+				#endif
+				return TCL_OK;
+			}else if(strcmp(argv[1], "setEncodedMsgSize") == 0)
+			{ 
+				
+				printf("%ld", atoi((char *)argv[2]));
+				outputSize_ = atoi((char *)argv[2]);
+			//	output_ = new char[outputSize_];
+			//  buffer_ = new char[outputSize_/RATE];	
+				#ifdef ADAM_DBG
+				printf("command: Setting Message Size %ld...\n", outputSize_);
+				#endif
+				return TCL_OK;
+			}else if(strcmp(argv[1], "send_msg") == 0)
+			{ 
+				msgToSend.assign((char *)argv[2]);
+				readFromMsg = true;
+				myMac->setJCLNode(0);
+				long size = msgToSend.length();
+				buffer_ = (char *)malloc(size);
+				bcopy(msgToSend.c_str(), buffer_, msgToSend.length());
+				#ifdef ADAM_DBG
+				printf("command: Read from message %s...\n", msgToSend.c_str());
+				#endif
+				tcl.resultf("%ld", msgToSend.length());
+				return TCL_OK;
+			}else if(strcmp(argv[1], "rcv_file") == 0)
+			{ 
+				outFileName.assign((char *)argv[2]);
+			  #ifdef ADAM_DBG
+				printf("command: Write to file %s...\n", outFileName.c_str());
+				#endif	
+				return TCL_OK;
+			}else if(strcmp(argv[1], "send_file") == 0)
+			{ 
+				msgToSend.assign((char *)argv[2]);
+				readFromFile = true;
+				readFromMsg = false;
+			  fSize_ = InitIn(msgToSend)*RATE;
+				#ifdef ADAM_DBG
+				printf("command: Read from file %s...\n", msgToSend.c_str());
+				#endif	
+				//tcl.resultf("%ld", size);
+				return TCL_OK;
+			}
+		}
+ 		else if(argc == 2)
+		{
+			/* Jam on Next Packet */
+			if (strcmp(argv[1], "jam") == 0)
+			{
+				sendJam(JAM_);	
+			  #ifdef ADAM_DBG
+				printf("command: Send a Jam...\n");
+				#endif	
+				return TCL_OK;
+			}
+			/* Dont Jam on the Next Packet */
+			else if (strcmp(argv[1], "no-jam") == 0)
+ 			{
+				sendJam(NO_JAM_);
+			  #ifdef ADAM_DBG
+				printf("command: Dont Send a Jam ...\n");
+				#endif	
+				return TCL_OK;
+			}
+			else if (strcmp(argv[1], "start") == 0)
+			{
+				start();
+			  #ifdef ADAM_DBG
+				printf("command: Prep for start...\n");
+				#endif	
+				return TCL_OK;
+			}else if (strcmp(argv[1], "stopL") == 0)
+			{
+				JammingOutputFile.open(outFileName.c_str(),std::ios::binary);
+				senderStopped = true;
+			  #ifdef ADAM_DBG
+				printf("command: Prep for stop...\n");
+				#endif	
+				return TCL_OK;
+			}
+		} 
+		return (Agent::command(argc, argv));
+}
+
+void JadeCoinAgent::start()
+{
+	jc_timer_.resched(0.00000001);
+	senderStopped = false;
+}
+
+void JadeCoinAgent::stop()
+{
+	//jc_timer_.cancel();
+	startToListen = false;
+	listener = true;
+	free(output_);
+	free(buffer_);
+	//delete []output_;
+	//delete []buffer_;
+
+}
+void JadeCoinAgent::sendCovertMsg(void)
+{
+
+  
+	if (readFromMsg)
+	{
+		#ifdef ADAM_DBG
+		//printf("sendCovertMsg: Sending %s...\n", buffer_);
+		#endif
+		encodeMsg(buffer_, msgToSend.length());
+	  jam_timer_.resched(0);
+		// Test The Encoder and Decoder for operation
+		//for(int i=0; i<size; i++)
+		//	printf("buffer_[%d]=%c\n",i, buffer_[i]);
+		// sending();		
+	}else if(readFromFile)
+	{	
+		#ifdef ADAM_DBG
+		//printf("sendCovertMsg: Sending %s...\n", msgToSend.c_str());
+		#endif
+		encodeMsg(buffer_, fSize_);
+	  jam_timer_.resched(0);
+		//repititionDecoder(output_, msgSize, buffer_);
+		//	Test the encoder and decoder for operation
+			for(int i=0; i<2; i++)
+				printf("buffer_[%d]=%c\n",i, buffer_[i]);
+		//sending();		
+	}	else	
+		{	
+			startToListen = true;
+			//InitOut(outFileName);
+			//puts("Listening for a Jam\n");
+		}
+}
+void JadeCoinAgent::encodeMsg(char* msg, long sizeofMsg)
+ {
+	//puts("encodeMsg:...\n");
+ 	// output_ =(char *) malloc(RATE*msgSize);	
+	outputSize_ = repititionEncoder(msg, sizeofMsg, output_);
+	#ifdef ADAM_DBG
+	//printf("encodeMsg: Sending Encoded Msg...\n");
+	#endif
+	
+		
+}
+void JadeCoinAgent::sending(void)
+{
+		static long bytenum = 0;
+		static int 	bit = 1;
+		static char currentByte;
+		static long msgSize = 0;
+		static ifstream swapFile("swapfileOP", 
+													std::ios::in | std::ios::binary);
+		
+		if (bytenum == 0 && bit == 1)
+		{
+			swapFile.seekg(0,std::ios::end);
+			msgSize = swapFile.tellg();
+			msgSize -= outputSize_;
+		}
+		#ifdef ADAM_DBGi
+		if (bit == 1)
+		{
+			swapFile.seekg(outputSize_+bytenum, std::ios::beg);
+			swapFile.read(&currentByte, 1);
+			swapFile.close();
+		}
+		//repititionDecoder(output_, outputSize_, buffer_);
+		//for (int i =0; i<2; i++)
+		//{
+		//	if(buffer_[i] == 'x')
+		//		puts("yes...");
+		// else
+		// {
+		// 		puts("noooooo");
+		//		abort();
+		//	}
+		//}
+		//printf("sending: bit= %ld, bytenum= %ld, output_[%ld] = %c...\n",
+		//bit, bytenum, bytenum, output_[bytenum]);
+		#endif
+		if (*sendNextJam)
+			printf("the value for send next jam %ld", *sendNextJam);	
+		if (*sendNextJam)
+		{
+			*sendNextJam = false;
+			// printf("incrementing bytenum");
+			if (currentByte & (char)bit)
+				sendJam(JAM_);
+			else 
+				sendJam(NO_JAM_);
+			if ((bit <<=1) == 0x100){
+			// printf("incrementing bytenum");
+				bytenum++;
+				bit = 1 ;
+			}
+		}
+		if (bytenum < msgSize)
+			{
+			// printf("rescheduling a send\n");
+				jam_timer_.resched(.010);
+			}
+		else
+				stop();
+			
+}
+void JadeCoinAgent::decodeMsg()
+{
+} 
+void JadeCoinAgent::sendJam(int JType)
+ {
+		printf("Sending a packet in JC\n");
+		//myMac->sendJAM((myPackets[JType])->copy());
+ 		jcSendTimer.start(JType);
+ }
+
+void JadeCoinAgent::InitOut( string fname )
+{
+		long size;
+		//swap.open("swapFILE", std::ios::in | std::ios::out);
+		//JammingOutputFile.open(fname.c_str(),std::ios::binary);
+		//string str; str.assign("swapfile");
+		#ifdef ADAM_DBG
+	//	printf("sendCovertMsg: Sending date from file %s and %ld bytes...\n", fname.c_str(), size);
+		#endif
+}
+long JadeCoinAgent::InitIn(string fname)
+{
+		long size;
+	
+		JammingInputFile.open(fname.c_str(), std::ios::in);
+		if(!JammingInputFile){
+			printf("sendCovertMsg: BAD FILE NAME %s declared!\n", fname.c_str());
+			return -1;
+		}
+		size = JammingInputFile.tellg();
+		JammingInputFile.seekg(0, std::ios::end);
+		size = JammingInputFile.tellg() - size;
+		JammingInputFile.seekg(0, std::ios::beg);
+		buffer_ = (char *)malloc(size);
+		JammingInputFile.read(buffer_, size);
+		JammingInputFile.close();
+		#ifdef ADAM_DBG
+		printf("sendCovertMsg: Sending date from file %s and %ld bytes...\n", fname.c_str(), size);
+		#endif
+		return size;
+}
+
+long JadeCoinAgent::repititionEncoder(char *src, long size, char* net)
+{
+	static fstream swapFile;
+	static long Start = 0;
+	long byteNum= 0,
+			 bitsToBytes = RATE/8,
+			 encodedBufSize = RATE*size;
+	
+	swapFile.open("swapfileOP", std::ios::in | std::ios::out);
+	if (!swapFile.is_open())
+	{
+		puts("Failed to Open swapfile, does it exist in pwd?");
+		abort();
+	}
+  swapFile.seekg(0, std::ios::end);
+	Start = swapFile.tellg();
+	char* dst = new char [encodedBufSize];
+	
+	int  bitNum = 0;
+	char *encoderOffset = 0, 
+			 	byteToEncode = 0;
+	
+	// (1) Acquire Byte to Encode 	
+	for (byteNum=0;byteNum<size;byteNum++)
+	{
+		byteToEncode  = src[byteNum];
+		// (#ofBits*8)/8, Since we are working in bytes
+		encoderOffset = (8*bitsToBytes*byteNum) + dst;
+		// (2) Aquire Bit to encode
+		//  Test Byte Encoding vs. Decoding
+		// printf("ByteToEncode = %x\n",byteToEncode);
+		for(bitNum=0; bitNum<8; bitNum++)
+		{	
+			// (3) Place Multiple Bytes
+			u_char *bOffset = bitNum*bitsToBytes + (u_char *)encoderOffset;	
+			// Test my byte Offsets
+		  // printf("%d is the byte offset\n", (bOffset - (u_char*) dst));
+			if(byteToEncode & 0x80)
+			{
+			  placeBytes(bOffset, bitsToBytes, 255 ); 
+			//	printf("1");
+			}
+			else 
+			{
+			//	printf("0");
+				placeBytes(bOffset,	bitsToBytes, 0); 
+			}
+			byteToEncode <<=1;
+		}
+		//puts("byte x complete");
+	}
+	// Test the encoding procedure
+	//for (int i=0; i<encodedBufSize; i++){
+	//		printf("%u in value  %d\n", (u_char) dst[i], i);
+	//}	
+	swapFile.write(dst, encodedBufSize);
+	swapFile.close();
+	return Start;
+}
+
+
+void JadeCoinAgent::placeBytes(u_char* dst,int numBytes, u_char byte)
+{
+	int count = 0;
+	for(count; count < numBytes; count++)
+		dst[count] = byte;
+}
+
+long JadeCoinAgent::repititionDecoder(char* src,long size, char *dst)
+{
+	long byteNum= 0,
+			 bitsToBytes= RATE/8,
+			 decodedBufSize = size/RATE;
+	
+	int  bitNum = 0;
+			 
+	char *encoderOffset  = 0,
+			 byteToDecode 	 = 0;
+
+	printf("repDec: decBufSize= %ld\n",decodedBufSize);
+	for(byteNum=0;byteNum<decodedBufSize; byteNum++)
+	{
+	  //printf("repDec: Decoding bytenum %ld, bitNum %ld\n", byteNum, bitNum);
+		dst[byteNum]=0;
+		encoderOffset = (8*bitsToBytes*byteNum)+src;
+		
+		for(bitNum=0; bitNum < 8; bitNum++)
+		{
+			u_char* bOffset = bitNum*bitsToBytes + (u_char *)encoderOffset;	
+			// Test my byte Offsets
+			printf("%x\n", (bOffset -(u_char *) src));
+			if(decodeBytes(bOffset, bitsToBytes))
+				dst[byteNum] +=1;
+			dst[byteNum] <<= 1;
+		}
+	}
+	for(int i=0; i<decodedBufSize; i++)
+		printf("recvd: dst[%d]=%c\n", i,dst[i]);
+}
+
+char JadeCoinAgent::decodeBytes(u_char *buf, int byteLength)
+{
+	int  byteCount = 0, 
+			 numOfOnes = 0,
+		   bitNum = 0;
+	
+	char tempByte = 0;
+
+	for (byteCount=0; byteCount<byteLength; byteCount++)
+	{
+		tempByte = buf[byteCount];
+		for(bitNum=0; bitNum<8; bitNum++)
+		{
+			if(tempByte & 0x80)
+				numOfOnes++;
+			tempByte<<=1;
+		}
+	}
+	
+	if (numOfOnes >= (byteLength/2))
+		return 1;
+	
+	return 0;
+}
+
+	//	static int  msgNum = 0;
+	//	#ifdef ADAM_DBG
+	//	//printf("sending: bit= %ld, bytenum= %ld, output_[%ld] = %c...\n",
+	//	//bit, bytenum, bytenum, output_[bytenum]);
+	//	#endif
+	//	/* Queue up some packets */
+	//	if (q_Size < Q_SIZE)
+	//	{
+	//		int numToQueue = (Q_SIZE-1)-(q_Size+Q_SIZE)%Q_SIZE; 
+	//		for(int i=0; i<numToQueue; i++, (++q_Size)%Q_SIZE)
+	//		{
+	//			myPacketQue[(q_Size+Q_SIZE)%Q_SIZE]=allocpkt();
+	//			myPacketQue[(q_Size+Q_SIZE)%Q_SIZE]=
+	//			// printf("incrementing bytenum");
+	//			if ((output_[bytenum]) & (char)bit)
+	//			//	sendJam(JAM_);
+	//			//  
+	//			else 
+	//				sendJam(NO_JAM_);
+	//			if ((bit <<=1) == 0x100){
+	//			// printf("incrementing bytenum");
+	//				bytenum++;
+	//				bit = 1 ;
+	//			}
+	//			if (bytenum < outputSize_)
+	//			{
+	//			// printf("rescheduling a send\n");
+	//				jam_timer_.resched(.010);
+	//			}
+	//			else
+	//				stop();
+	//		
+	//		
+	//		
+	//		
+	//		
+	//		}

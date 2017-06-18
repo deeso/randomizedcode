@@ -1,0 +1,95 @@
+/**
+ *       Filename:  jadecoin.h
+ *    Description:  Header file for a new 'Jade Coin' Agent Class for ns
+ * 
+ *          Author:  Adam Pridgen ()
+ *           Email:  atpridgen@mail.utexas.edu
+ */
+
+
+#ifndef JADECOIN_H
+#define JADECOIN_H
+
+#include "agent.h"
+#include "tclcl.h"
+#include "packet.h"
+#include "address.h"
+
+#include "mac-timers.h"
+#include "mac-802_11.h"
+#include "ip.h"
+/**
+ * 	Jade Coin Header
+ * 	sendCode - Jamming Sentinel
+ * 	msgNum 	 - Message Number
+ * 	timeout  - Timeout Calc. from 
+ * 						 bandwidth & numNodes
+ */
+
+#define MAX_SYMBOL_SIZE_ 32
+#define MAX_BUFF_SIZE_   10
+#define MAX_MSG_SIZE_ 	 20
+#define MAX_JAM_SIZE_    700
+#define JAM_ 					    1
+#define NO_JAM_ 			    0
+#define TIMEOUT 				 -1
+struct hdr_jadecoin
+{
+	u_int32_t sendCode_;
+	u_int32_t& sendCode(){return sendCode_;}
+	int msgNum_;
+	int& msgNum(){return msgNum_;}
+	double timeout_;
+	double& timeout(){return timeout_;}
+	char 	 data_[700];
+	char*  data(){return data_;}
+	// Header access methods
+	static int offset_;
+	inline static int& offset() { return offset_; }
+	inline static hdr_jadecoin* access(const Packet* p) {
+		return (hdr_jadecoin*) p->access(offset_);
+	}
+};
+class Mac802_11;
+class JadeCoinAgent : public Agent
+{
+	public:
+		JadeCoinAgent();
+		int command(int argc, const char*const* argv);
+		
+	private:
+		void encodeMsg(char *msg, int count);
+		void decodeMsg();
+		void calcTimeout();
+		void recv(Packet *p, Handler *h);
+		void sendJam(int JType);
+		int updateBandwidth();
+		int updateNumberHosts();
+	/**
+	 *  codeBuff - encode or decode buffer
+	 * 	MsgBuf   - Message Buffer		
+	 *	numNodes - Number of Node in the LAN
+ 	 * 	bandwidth- Bandwidth (in Bytes) Observered 
+	 * 						 in the LAN
+	 */
+		/* Lots of Data Forms Best Burst Error */
+		char 			myDATA[MAX_JAM_SIZE_];
+  	
+		char 		  msgBuff[MAX_MSG_SIZE_];
+		u_int32_t	msgSize;
+		u_int32_t msgNum;
+
+		u_int32_t codeBuff;
+		u_int32_t	numberBitsReceived; 
+		u_int32_t symbolSize;
+
+		/* For the TO Calulation */
+		int 			timeout;
+		int 			numNodes;
+		u_int32_t	bandwidth;
+		Mac802_11 *myMac;
+//		int offset_;	
+};
+
+
+#endif

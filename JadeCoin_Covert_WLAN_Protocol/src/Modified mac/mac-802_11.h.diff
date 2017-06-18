@@ -1,0 +1,22 @@
+
+// Jamming Sentinels Passed Down From the Upper Layer Protocol
+#define MAC_JAM_SENTINEL   	((u_int32_t) 0xfffffff1)
+#define MAC_NO_JAM_SENTINEL ((u_int32_t) 0xfffffff2)
+
+#define MAC_Type_JAM    	 0xFF // Definition of the Jamming Pac
+#define MAC_Subtype_JAM    0x01 // Definition of the Jamming 
+#define MAC_Subtype_NO_JAM 0x00 // Sub Types
+
+class Mac802_11			
+		friend class JamTimer; // TImeout for the Clandestine
+		friend class CollisionTimer; // Detects Collision in the 
+		
+		public:
+			inline int  nodeCount() { return cache_node_count_;} 
+			inline double getSlotTime() { return phymib_.getSlotT
+		private:
+			int 	check_pktJAM(); // Check to see if we are xmi
+			void  sendJAM(Packet *p); // Send a Jamming Packet
+			void  recvJAM(); // Uses Collision TImer to "illustra
+		  JamTimer  mhJam_; 		// Jam Timer for Jamm
+			CollisionTimer mhCollision_; // timer for resetting c
